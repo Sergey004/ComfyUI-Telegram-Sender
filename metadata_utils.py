@@ -3,7 +3,11 @@ import re
 import json
 
 # Import modular capture system
-from .modules.capture import Capture
+try:
+    from .modules.capture import Capture
+except ImportError:
+    # Fallback for direct execution
+    from modules.capture import Capture
 
 
 class MetadataUtils:
@@ -293,7 +297,9 @@ class MetadataUtils:
             if loras:
                 lora_names = [lora.get('name', '') for lora in loras if lora.get('name')]
                 if lora_names:
-                    lines.append(f"🎨 LoRAs: {', '.join(lora_names)}")
+                    # Ensure all lora names are strings before joining
+                    lora_names_str = [str(name) for name in lora_names]
+                    lines.append(f"🎨 LoRAs: {', '.join(lora_names_str)}")
         
         return "\n".join(lines) if lines else ""
 

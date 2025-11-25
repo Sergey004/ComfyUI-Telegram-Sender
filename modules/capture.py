@@ -188,7 +188,13 @@ class Capture:
         params_list = []
         for key, value in pnginfo_dict.items():
             if key not in ["Positive prompt", "Negative prompt"] and value:
-                params_list.append(f"{key}: {value}")
+                # Ensure value is converted to string properly
+                if isinstance(value, list):
+                    # Convert list to string representation
+                    value_str = ", ".join(str(item) for item in value)
+                else:
+                    value_str = str(value)
+                params_list.append(f"{key}: {value_str}")
         
         if params_list:
             parts.append(", ".join(params_list))

@@ -13,7 +13,11 @@ import numpy as np
 import torch
 
 # Import metadata utilities
-from .metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
+try:
+    from .metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
+except ImportError:
+    # Fallback for direct execution
+    from metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
 
 # Config file path
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -127,7 +131,7 @@ class TelegramSender:
                 }),
                 "send_as_document": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Send as file instead of photo (no compression)"
+                    "tooltip": "Send as file in addition to photo (no compression, sends both)"
                 }),
                 "max_size": ("INT", {
                     "default": 2560, 
@@ -189,7 +193,7 @@ class TelegramSender:
     FUNCTION = "send_to_telegram"
     OUTPUT_NODE = True
     CATEGORY = "image/telegram"
-    DESCRIPTION = "Sends generated images to Telegram. Configure bot token using TelegramConfig node first."
+    DESCRIPTION = "Sends generated images to Telegram. Always sends as photo, optionally sends as document. Configure bot token using TelegramConfig node first."
 
     def send_to_telegram(self, images, chat_id="", bot_token_override="", 
                         positive_prompt="", negative_prompt="",
@@ -282,31 +286,35 @@ class TelegramSender:
                     self._cleanup_file(temp_path)
                     continue
                 
-                # Determine which file to send
-                if send_as_document:
-                    # Send original PNG without any processing
-                    file_to_send = temp_path
-                    print(f"[TelegramSender] 📄 Sending as document (original PNG, no resize)")
-                else:
-                    # Resize if needed for photo
-                    processed_path = self._resize_image(temp_path, max_size, landscape_max_width)
-                    
-                    # Compress if too large
-                    try:
-                        if os.path.getsize(processed_path) > 10 * 1024 * 1024:
-                            processed_path = self._compress_image(processed_path)
-                    except Exception as e:
-                        print(f"[TelegramSender] Compression check failed: {e}")
-                    
-                    file_to_send = processed_path
+                # Always send as photo (resized/compressed)
+                photo_path = self._resize_image(temp_path, max_size, landscape_max_width)
                 
-                # Send in background thread
+                # Compress if too large
+                try:
+                    if os.path.getsize(photo_path) > 10 * 1024 * 1024:
+                        photo_path = self._compress_image(photo_path)
+                except Exception as e:
+                    print(f"[TelegramSender] Compression check failed: {e}")
+                
+                # Send photo in background thread
                 threading.Thread(
                     target=self._send_telegram_request,
-                    args=(file_to_send, target_chat_id, bot_token, 
-                          send_as_document, temp_path, retry_count, retry_delay),
+                    args=(photo_path, target_chat_id, bot_token, 
+                          False, temp_path, retry_count, retry_delay),
                     daemon=True
                 ).start()
+                
+                # Optionally send as document (original PNG)
+                if send_as_document:
+                    threading.Thread(
+                        target=self._send_telegram_request,
+                        args=(temp_path, target_chat_id, bot_token, 
+                              True, temp_path, retry_count, retry_delay),
+                        daemon=True
+                    ).start()
+                    print(f"[TelegramSender] 📄 Sending as document in addition to photo (original PNG, no resize)")
+                else:
+                    print(f"[TelegramSender] 📷 Sending as photo only")
                 
             except Exception as e:
                 print(f"[TelegramSender] ❌ Error processing image {i}: {e}")
@@ -413,7 +421,11 @@ class TelegramSender:
         except Exception as e:
             print(f"[TelegramSender] Error extracting parameters: {e}")
         
-        return ", ".join(params) if params else ""
+        # Ensure all params are strings before joining
+        if params:
+            params_str = [str(param) for param in params]
+            return ", ".join(params_str)
+        return ""
 
     def _extract_loras_from_workflow(self, prompt_dict, extra_pnginfo=None, enable_enhanced=True):
         """Extract list of LoRA names used in workflow using enhanced metadata extraction"""
