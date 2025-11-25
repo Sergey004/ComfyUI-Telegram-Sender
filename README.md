@@ -454,6 +454,7 @@ Pull requests are welcome! For major changes, please open an issue first to disc
 ## 🙏 Acknowledgments
 
 Based on the original extension for AUTOMATIC1111 stable-diffusion-webui.
+Modules for metadata uset from <https://github.com/edelvarden/comfyui_image_metadata_extension>
 
 ## 📞 Support
 
