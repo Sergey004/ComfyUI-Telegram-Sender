@@ -2,44 +2,130 @@ import os
 import re
 import json
 
-# Import modular capture system
-try:
-    from .modules.capture import Capture
-except ImportError:
-    # Fallback for direct execution
-    from modules.capture import Capture
-
 
 class MetadataUtils:
     """
-    Utility class for extracting metadata from ComfyUI workflows using modular capture system
+    Utility class for extracting metadata from ComfyUI workflows
+    Based on comfyui_image_metadata_extension architecture but independently implemented
     """
     
     @staticmethod
     def extract_metadata_from_workflow(prompt, extra_pnginfo=None):
         """
-        Extract comprehensive metadata from workflow using modular capture system
+        Extract comprehensive metadata from workflow by directly parsing prompt
+        
+        Args:
+            prompt: dict - ComfyUI workflow prompt (nodes dict)
+            extra_pnginfo: dict - Additional PNG info (optional)
         
         Returns: dict containing metadata fields
         """
-        if not prompt:
+        if not prompt or not isinstance(prompt, dict):
             return {}
         
         pnginfo_dict = {}
         
         try:
-            # Extract inputs using modular capture system
-            inputs = Capture.get_inputs(prompt, extra_pnginfo)
+            # Extract each type of metadata directly from prompt nodes
             
-            # Generate PNG info dictionary
-            # For simplicity, we'll use inputs_before_sampler_node = inputs
-            # In a more sophisticated implementation, we'd trace the workflow
-            pnginfo_dict = Capture.gen_pnginfo_dict(inputs, inputs, prompt)
+            # 1. Extract prompts (positive and negative)
+            prompts = MetadataUtils._extract_prompts_from_workflow(prompt)
+            if prompts.get("positive"):
+                pnginfo_dict["Positive prompt"] = prompts["positive"]
+            if prompts.get("negative"):
+                pnginfo_dict["Negative prompt"] = prompts["negative"]
+            
+            # 2. Extract sampling parameters
+            sampling_params = MetadataUtils._extract_sampling_parameters(prompt)
+            pnginfo_dict.update(sampling_params)
+            
+            # 3. Extract model information
+            model_info = MetadataUtils._extract_model_info(prompt)
+            pnginfo_dict.update(model_info)
+            
+            # 4. Extract LoRA information
+            lora_info = MetadataUtils._extract_lora_info(prompt)
+            pnginfo_dict.update(lora_info)
+            
+            # 5. Extract image size
+            size_info = MetadataUtils._extract_size_info(prompt)
+            pnginfo_dict.update(size_info)
+            
+            print(f"[MetadataUtils] ✅ Extracted metadata with {len(pnginfo_dict)} fields")
             
         except Exception as e:
-            print(f"[MetadataUtils] Error extracting metadata: {e}")
+            print(f"[MetadataUtils] ⚠️ Error extracting metadata: {e}")
+            import traceback
+            traceback.print_exc()
         
         return pnginfo_dict
+    
+    @staticmethod
+    def _extract_prompts_from_workflow(prompt):
+        """Extract positive and negative prompts from workflow"""
+        prompts = {"positive": "", "negative": ""}
+        
+        if not prompt:
+            return prompts
+        
+        clip_nodes = []
+        
+        # Find all CLIPTextEncode nodes
+        for node_id, node_data in prompt.items():
+            class_type = node_data.get("class_type", "")
+            inputs = node_data.get("inputs", {})
+            
+            if class_type == "CLIPTextEncode":
+                text = inputs.get("text", "")
+                if text:
+                    clip_nodes.append({
+                        "node_id": node_id,
+                        "text": text,
+                        "length": len(str(text))
+                    })
+        
+        if not clip_nodes:
+            return prompts
+        
+        # If we have exactly 2 CLIPTextEncode nodes, try to determine positive/negative
+        # Use heuristic: the one with more content is usually negative (more exclusions)
+        # But if we find common negative keywords, use those
+        if len(clip_nodes) == 2:
+            negative_keywords = ["ugly", "bad", "blurry", "low quality", "poor", "worst", "horrible", "awful", "gross", "disgusting"]
+            
+            # Check which prompt contains negative keywords
+            has_negative = [False, False]
+            for i, node in enumerate(clip_nodes):
+                text_lower = node["text"].lower()
+                for keyword in negative_keywords:
+                    if keyword in text_lower:
+                        has_negative[i] = True
+                        break
+            
+            # If one has negative keywords and the other doesn't, use that as negative
+            if has_negative[0] and not has_negative[1]:
+                prompts["positive"] = clip_nodes[1]["text"]
+                prompts["negative"] = clip_nodes[0]["text"]
+                print(f"[MetadataUtils] 📝 Found 2 prompts (keyword detection: negative keywords in first)")
+            elif has_negative[1] and not has_negative[0]:
+                prompts["positive"] = clip_nodes[0]["text"]
+                prompts["negative"] = clip_nodes[1]["text"]
+                print(f"[MetadataUtils] 📝 Found 2 prompts (keyword detection: negative keywords in second)")
+            else:
+                # Fallback: use length-based heuristic (shorter = positive usually)
+                sorted_nodes = sorted(clip_nodes, key=lambda x: x["length"])
+                prompts["positive"] = sorted_nodes[0]["text"]
+                prompts["negative"] = sorted_nodes[1]["text"]
+                print(f"[MetadataUtils] 📝 Found 2 prompts (length-based: positive {sorted_nodes[0]['length']}ch, negative {sorted_nodes[1]['length']}ch)")
+        
+        # If we have 1 or more nodes, use first as positive
+        elif len(clip_nodes) >= 1:
+            prompts["positive"] = clip_nodes[0]["text"]
+            if len(clip_nodes) > 1:
+                prompts["negative"] = clip_nodes[1]["text"]
+            print(f"[MetadataUtils] 📝 Found {len(clip_nodes)} prompt node(s)")
+        
+        return prompts
     
     @staticmethod
     def _extract_positive_prompt(prompt):
@@ -72,15 +158,19 @@ class MetadataUtils:
     
     @staticmethod
     def _extract_sampling_parameters(prompt):
-        """Extract sampling parameters from workflow"""
+        """Extract sampling parameters from workflow (seed, steps, cfg, etc.)"""
         params = {}
         
+        if not prompt:
+            return params
+        
+        # Find KSampler or similar sampling nodes
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
+            inputs = node_data.get("inputs", {})
             
             if "sampler" in class_type.lower() or "ksampler" in class_type.lower():
-                inputs = node_data.get("inputs", {})
-                
+                # Extract all sampling parameters
                 seed = inputs.get("seed")
                 steps = inputs.get("steps")
                 cfg = inputs.get("cfg")
@@ -88,19 +178,20 @@ class MetadataUtils:
                 scheduler = inputs.get("scheduler")
                 denoise = inputs.get("denoise")
                 
-                if steps:
-                    params["Steps"] = str(steps)
+                if steps is not None:
+                    params["Steps"] = str(int(steps))
                 if sampler_name:
                     params["Sampler"] = str(sampler_name)
                 if scheduler:
-                    params["Schedule type"] = str(scheduler)
-                if cfg:
-                    params["CFG scale"] = str(cfg)
+                    params["Scheduler"] = str(scheduler)
+                if cfg is not None:
+                    params["CFG scale"] = str(float(cfg))
                 if seed is not None:
-                    params["Seed"] = str(seed)
-                if denoise is not None and denoise != 1.0:
-                    params["Denoising strength"] = str(denoise)
+                    params["Seed"] = str(int(seed))
+                if denoise is not None and float(denoise) != 1.0:
+                    params["Denoising strength"] = str(float(denoise))
                 
+                print(f"[MetadataUtils] ⚙️ Found sampling parameters in node {node_id}")
                 break  # Use first sampler found
         
         return params
@@ -110,19 +201,26 @@ class MetadataUtils:
         """Extract model information from workflow"""
         model_info = {}
         
+        if not prompt:
+            return model_info
+        
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
             inputs = node_data.get("inputs", {})
             
-            if "checkpoint" in class_type.lower():
+            # Extract checkpoint/model
+            if "checkpoint" in class_type.lower() and not model_info.get("Model"):
                 model_name = inputs.get("ckpt_name")
                 if model_name:
                     model_info["Model"] = os.path.splitext(os.path.basename(model_name))[0]
+                    print(f"[MetadataUtils] 🤖 Found model: {model_info['Model']}")
             
-            if "vae" in class_type.lower():
+            # Extract VAE
+            if "vae" in class_type.lower() and not model_info.get("VAE"):
                 vae_name = inputs.get("vae_name")
                 if vae_name:
                     model_info["VAE"] = os.path.splitext(os.path.basename(vae_name))[0]
+                    print(f"[MetadataUtils] 🎨 Found VAE: {model_info['VAE']}")
         
         return model_info
     
@@ -132,20 +230,28 @@ class MetadataUtils:
         lora_info = {}
         loras = []
         
+        if not prompt:
+            return lora_info
+        
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
             
             if "lora" in class_type.lower():
                 inputs = node_data.get("inputs", {})
                 lora_name = inputs.get("lora_name")
-                strength = inputs.get("strength_model", inputs.get("strength", 1.0))
+                
+                # Try multiple strength field names
+                strength = inputs.get("strength_model", 
+                          inputs.get("strength_clip", 
+                          inputs.get("strength", 1.0)))
                 
                 if lora_name:
                     clean_name = os.path.splitext(os.path.basename(lora_name))[0]
                     loras.append(f"{clean_name}: {strength}")
+                    print(f"[MetadataUtils] 🎨 Found LoRA: {clean_name} (strength: {strength})")
         
         if loras:
-            lora_info["Lora hashes"] = f'"{", ".join(loras)}"'
+            lora_info["Lora hashes"] = ", ".join(loras)
         
         return lora_info
     
@@ -154,16 +260,21 @@ class MetadataUtils:
         """Extract image size information from workflow"""
         size_info = {}
         
+        if not prompt:
+            return size_info
+        
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
             inputs = node_data.get("inputs", {})
             
-            if "empty" in class_type.lower() and "latent" not in class_type.lower():
+            # Look for nodes that generate images (EmptyLatentImage, etc)
+            if ("empty" in class_type.lower() or "latent" in class_type.lower()) and "latent" not in class_type.lower():
                 width = inputs.get("width")
                 height = inputs.get("height")
                 
                 if width and height:
                     size_info["Size"] = f"{width}x{height}"
+                    print(f"[MetadataUtils] 📐 Found image size: {width}x{height}")
                     break
         
         return size_info
@@ -172,8 +283,53 @@ class MetadataUtils:
     def build_a1111_style_metadata(pnginfo_dict):
         """
         Build A1111-style metadata string from PNG info dictionary
+        Format: "positive_prompt\nNegative prompt: negative_prompt\nSteps: 20, Sampler: euler, ..."
         """
-        return Capture.gen_parameters_str(pnginfo_dict)
+        if not pnginfo_dict:
+            return ""
+        
+        parts = []
+        
+        # Add positive prompt first
+        positive = pnginfo_dict.get("Positive prompt", "")
+        if positive:
+            parts.append(str(positive))
+        
+        # Add negative prompt with prefix
+        negative = pnginfo_dict.get("Negative prompt", "")
+        if negative:
+            parts.append(f"Negative prompt: {negative}")
+        
+        # Add all other parameters in a single line
+        param_parts = []
+        
+        param_order = ["Steps", "Sampler", "Scheduler", "CFG scale", "Seed", "Size", "Model", "VAE", "Lora hashes", "Denoising strength"]
+        
+        for param in param_order:
+            if param in pnginfo_dict:
+                value = pnginfo_dict[param]
+                if param == "Lora hashes":
+                    # Special formatting for LoRA
+                    param_parts.append(f'{param}: "{value}"')
+                elif param in ["CFG scale", "Denoising strength"]:
+                    # Float parameters
+                    try:
+                        float_val = float(value)
+                        param_parts.append(f"{param}: {float_val}")
+                    except (ValueError, TypeError):
+                        param_parts.append(f"{param}: {value}")
+                else:
+                    param_parts.append(f"{param}: {value}")
+        
+        # Add any remaining parameters not in our list
+        for key, value in pnginfo_dict.items():
+            if key not in ["Positive prompt", "Negative prompt"] and key not in param_order:
+                param_parts.append(f"{key}: {value}")
+        
+        if param_parts:
+            parts.append(", ".join(param_parts))
+        
+        return "\n".join(parts)
     
     @staticmethod
     def extract_loras_from_metadata(pnginfo_dict):

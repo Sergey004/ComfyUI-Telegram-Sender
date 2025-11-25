@@ -368,7 +368,7 @@ class TelegramSender:
                         
                         # If we got valid metadata, use it
                         if metadata_text and metadata_text.strip():
-                            print(f"[TelegramSender] ✅ Using enhanced metadata extraction")
+                            print(f"[TelegramSender] ✅ Using enhanced metadata extraction from workflow")
                             return metadata_text
                     except Exception as e:
                         print(f"[TelegramSender] ⚠️ Enhanced metadata building failed: {e}")
@@ -377,6 +377,23 @@ class TelegramSender:
                 print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
         
         # Fallback to original method if enhanced extraction fails
+        # But still use enhanced extraction for metadata if available
+        try:
+            if enable_enhanced and prompt_dict:
+                pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
+                if pnginfo_dict:
+                    # Use extracted metadata instead of passed prompts if extraction was successful
+                    extracted_positive = pnginfo_dict.get("Positive prompt", positive_prompt)
+                    extracted_negative = pnginfo_dict.get("Negative prompt", negative_prompt)
+                    
+                    # Use extracted values if they exist and are not empty
+                    if extracted_positive or extracted_negative:
+                        positive_prompt = extracted_positive if extracted_positive else positive_prompt
+                        negative_prompt = extracted_negative if extracted_negative else negative_prompt
+        except Exception as e:
+            print(f"[TelegramSender] ⚠️ Fallback metadata extraction failed: {e}")
+        
+        # Build fallback metadata
         parts = []
         
         # Add positive prompt
@@ -478,16 +495,22 @@ class TelegramSender:
                         for lora_info in enhanced_loras:
                             lora_name = lora_info.get('name', '')
                             if lora_name:
-                                loras.append(lora_name.lower())
-                        print(f"[TelegramSender] ✅ Enhanced LoRA extraction found {len(loras)} LoRAs")
-                        return loras
+                                clean_lora_name = lora_name.lower().strip()
+                                loras.append(clean_lora_name)
+                        
+                        if loras:
+                            print(f"[TelegramSender] ✅ Enhanced LoRA extraction found {len(loras)} LoRAs: {loras}")
+                            return loras
+                        else:
+                            print(f"[TelegramSender] ⚠️ Enhanced extraction returned empty list, falling back to direct extraction")
                     except Exception as e:
                         print(f"[TelegramSender] ⚠️ Enhanced LoRA processing failed: {e}")
         
         except Exception as e:
             print(f"[TelegramSender] ⚠️ Enhanced LoRA extraction failed: {e}")
         
-        # Fallback to original method
+        # Fallback to original method - direct workflow inspection
+        print(f"[TelegramSender] 🔍 Using fallback LoRA extraction from workflow nodes")
         try:
             for node_id, node_data in prompt_dict.items():
                 class_type = node_data.get("class_type", "")
@@ -498,10 +521,17 @@ class TelegramSender:
                     if lora_name:
                         # Remove file extension and path
                         clean_name = os.path.splitext(os.path.basename(lora_name))[0]
-                        loras.append(clean_name.lower())
+                        clean_name = clean_name.lower().strip()
+                        loras.append(clean_name)
+                        print(f"[TelegramSender] 📍 Found LoRA in node: {clean_name} (from {lora_name})")
         
         except Exception as e:
-            print(f"[TelegramSender] Error extracting LoRAs: {e}")
+            print(f"[TelegramSender] ❌ Error extracting LoRAs: {e}")
+        
+        if loras:
+            print(f"[TelegramSender] ✅ Extracted LoRAs from workflow: {loras}")
+        else:
+            print(f"[TelegramSender] ⚠️ No LoRAs found in workflow")
         
         return loras
 
@@ -522,11 +552,18 @@ class TelegramSender:
             try:
                 lora_key, chat_id = line.split(':', 1)
                 lora_key = lora_key.strip().lower()
+                
+                # Remove "lora " prefix if present (common format: "lora name:chat_id")
+                if lora_key.startswith("lora "):
+                    lora_key = lora_key[5:].strip()
+                
                 chat_id = chat_id.strip()
                 
                 if lora_key and chat_id:
                     mapping[lora_key] = chat_id
-            except:
+                    print(f"[TelegramSender] 📋 Loaded LoRA mapping: '{lora_key}' → {chat_id}")
+            except Exception as e:
+                print(f"[TelegramSender] ⚠️ Error parsing LoRA mapping line '{line}': {e}")
                 continue
         
         return mapping
@@ -535,39 +572,62 @@ class TelegramSender:
                           enable_nsfw, nsfw_channel_id, unsorted_channel_id,
                           enable_lora_routing, loras_in_workflow):
         """Determine which chat to send to based on content"""
-        target_chat_id = default_chat_id
+        target_chat_id = None
         
-        # LoRA-based routing (highest priority after explicit chat_id)
-        if enable_lora_routing and not target_chat_id and loras_in_workflow:
+        print(f"[TelegramSender] 🔀 Routing logic:")
+        print(f"  - Default chat_id: {default_chat_id}")
+        print(f"  - Enable LoRA routing: {enable_lora_routing}")
+        print(f"  - LoRAs in workflow: {loras_in_workflow}")
+        print(f"  - Enable NSFW detection: {enable_nsfw}")
+        
+        # Priority 1: LoRA-based routing (highest priority if enabled and LoRAs found)
+        if enable_lora_routing and loras_in_workflow:
             lora_mapping = self._parse_lora_mapping()
             
             if lora_mapping:
+                print(f"[TelegramSender] 📚 Available LoRA mappings: {lora_mapping}")
+                
                 # Check each LoRA in workflow against mapping
                 for lora_in_workflow in loras_in_workflow:
                     for lora_key, mapped_chat_id in lora_mapping.items():
                         # Match if mapping key is substring of actual LoRA name
                         if lora_key in lora_in_workflow:
-                            print(f"[TelegramSender] 🎯 LoRA routing: '{lora_in_workflow}' matched '{lora_key}' → {mapped_chat_id}")
+                            print(f"[TelegramSender] ✅ LoRA routing: '{lora_in_workflow}' matched key '{lora_key}' → {mapped_chat_id}")
                             target_chat_id = mapped_chat_id
                             break
                     
                     if target_chat_id:
                         break
+                
+                if not target_chat_id:
+                    print(f"[TelegramSender] ⚠️ No LoRA mapping found for: {loras_in_workflow}")
+            else:
+                print(f"[TelegramSender] ⚠️ LoRA routing enabled but no mappings configured")
         
-        # NSFW detection (overrides LoRA routing if NSFW found)
+        # Priority 2: NSFW detection (overrides LoRA routing if NSFW found)
         if enable_nsfw and nsfw_channel_id:
             positive_lower = positive_prompt.lower() if positive_prompt else ""
             negative_lower = negative_prompt.lower() if negative_prompt else ""
             
             # If NSFW in positive but not in negative, redirect
             if "nsfw" in positive_lower and "nsfw" not in negative_lower:
-                print("[TelegramSender] 🔞 NSFW detected, redirecting to NSFW channel")
+                print(f"[TelegramSender] 🔞 NSFW detected in positive prompt, redirecting to {nsfw_channel_id}")
                 target_chat_id = nsfw_channel_id
         
-        # Fallback to unsorted channel if no chat_id
+        # Priority 3: Use default chat_id if no routing matched
+        if not target_chat_id and default_chat_id:
+            print(f"[TelegramSender] 📌 Using default chat_id: {default_chat_id}")
+            target_chat_id = default_chat_id
+        
+        # Priority 4: Fallback to unsorted channel if no other chat_id
         if not target_chat_id and unsorted_channel_id:
-            print("[TelegramSender] 📦 Using unsorted channel")
+            print(f"[TelegramSender] 📦 Using unsorted channel: {unsorted_channel_id}")
             target_chat_id = unsorted_channel_id
+        
+        if target_chat_id:
+            print(f"[TelegramSender] ✅ Final destination: {target_chat_id}")
+        else:
+            print(f"[TelegramSender] ❌ No target chat_id determined!")
         
         return target_chat_id
 
