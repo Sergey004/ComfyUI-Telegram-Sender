@@ -3,7 +3,7 @@ import re
 import json
 
 # Import modular capture system
-from modules.capture import Capture
+from .modules.capture import Capture
 
 
 class MetadataUtils:

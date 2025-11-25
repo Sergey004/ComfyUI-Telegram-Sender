@@ -4,14 +4,16 @@ import requests
 import threading
 import time
 import json
-import folder_paths # type: ignore
+import sys
+sys.path.append("../../")
+import folder_paths
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
 
 # Import metadata utilities
-from metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
+from .metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
 
 # Config file path
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
