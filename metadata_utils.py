@@ -10,13 +10,74 @@ class MetadataUtils:
     """
     
     @staticmethod
-    def extract_metadata_from_workflow(prompt, extra_pnginfo=None):
+    def debug_prompt_structure(prompt, verbose=False):
+        """
+        Debug function to print all nodes and their inputs from workflow
+        Useful for understanding the actual structure of prompts from real ComfyUI
+        
+        Usage: MetadataUtils.debug_prompt_structure(prompt, verbose=True)
+        """
+        if not prompt or not isinstance(prompt, dict):
+            print("[MetadataUtils DEBUG] Empty or invalid prompt structure")
+            return
+        
+        print("\n" + "="*80)
+        print("[MetadataUtils DEBUG] COMFYUI WORKFLOW STRUCTURE ANALYSIS")
+        print("="*80)
+        print(f"Total nodes: {len(prompt)}\n")
+        
+        for node_id, node_data in prompt.items():
+            class_type = node_data.get("class_type", "UNKNOWN")
+            inputs = node_data.get("inputs", {})
+            
+            print(f"📌 Node ID: {node_id}")
+            print(f"   Class Type: {class_type}")
+            
+            if inputs and verbose:
+                print(f"   Inputs ({len(inputs)} items):")
+                for key, value in inputs.items():
+                    value_type = type(value).__name__
+                    
+                    # Show actual value with type info
+                    if isinstance(value, list):
+                        if value:
+                            print(f"     ├─ {key}: LIST[{value_type}] ({len(value)} items)")
+                            for i, item in enumerate(value[:2]):  # Show first 2 items
+                                item_type = type(item).__name__
+                                item_str = str(item)[:60]
+                                print(f"     │  [{i}] {item_type}: {item_str}")
+                            if len(value) > 2:
+                                print(f"     │  ... and {len(value) - 2} more items")
+                        else:
+                            print(f"     ├─ {key}: LIST (empty)")
+                    elif isinstance(value, dict):
+                        print(f"     ├─ {key}: DICT ({len(value)} keys)")
+                    elif isinstance(value, (int, float)):
+                        print(f"     ├─ {key}: {value_type} = {value}")
+                    elif isinstance(value, str):
+                        value_short = value[:50] + "..." if len(value) > 50 else value
+                        print(f"     ├─ {key}: {value_type} = '{value_short}'")
+                    else:
+                        print(f"     ├─ {key}: {value_type} = {str(value)[:50]}")
+            elif inputs:
+                # Non-verbose mode - just show key names and types
+                input_types = {k: type(v).__name__ for k, v in inputs.items()}
+                print(f"   Input keys: {list(inputs.keys())}")
+                print(f"   Input types: {input_types}")
+            print()
+        
+        print("="*80 + "\n")
+    
+    @staticmethod
+    def extract_metadata_from_workflow(prompt, extra_pnginfo=None, debug=False, verbose_debug=False):
         """
         Extract comprehensive metadata from workflow by directly parsing prompt
         
         Args:
             prompt: dict - ComfyUI workflow prompt (nodes dict)
             extra_pnginfo: dict - Additional PNG info (optional)
+            debug: bool - Enable debug output
+            verbose_debug: bool - Enable very detailed workflow analysis
         
         Returns: dict containing metadata fields
         """
@@ -26,32 +87,56 @@ class MetadataUtils:
         pnginfo_dict = {}
         
         try:
+            # Print workflow structure if verbose debug enabled
+            if verbose_debug:
+                MetadataUtils.debug_prompt_structure(prompt, verbose=True)
+            
+            if debug or verbose_debug:
+                print(f"\n[MetadataUtils DEBUG] Starting metadata extraction")
+                print(f"[MetadataUtils DEBUG] Total nodes in workflow: {len(prompt)}")
+            
             # Extract each type of metadata directly from prompt nodes
             
             # 1. Extract prompts (positive and negative)
-            prompts = MetadataUtils._extract_prompts_from_workflow(prompt)
+            if debug or verbose_debug:
+                print(f"[MetadataUtils DEBUG] Step 1: Extracting prompts...")
+            prompts = MetadataUtils._extract_prompts_from_workflow(prompt, debug=debug or verbose_debug)
             if prompts.get("positive"):
                 pnginfo_dict["Positive prompt"] = prompts["positive"]
             if prompts.get("negative"):
                 pnginfo_dict["Negative prompt"] = prompts["negative"]
             
             # 2. Extract sampling parameters
-            sampling_params = MetadataUtils._extract_sampling_parameters(prompt)
+            if debug or verbose_debug:
+                print(f"[MetadataUtils DEBUG] Step 2: Extracting sampling parameters...")
+            sampling_params = MetadataUtils._extract_sampling_parameters(prompt, debug=debug or verbose_debug)
             pnginfo_dict.update(sampling_params)
             
             # 3. Extract model information
-            model_info = MetadataUtils._extract_model_info(prompt)
+            if debug or verbose_debug:
+                print(f"[MetadataUtils DEBUG] Step 3: Extracting model information...")
+            model_info = MetadataUtils._extract_model_info(prompt, debug=debug or verbose_debug)
             pnginfo_dict.update(model_info)
             
             # 4. Extract LoRA information
-            lora_info = MetadataUtils._extract_lora_info(prompt)
+            if debug or verbose_debug:
+                print(f"[MetadataUtils DEBUG] Step 4: Extracting LoRA information...")
+            lora_info = MetadataUtils._extract_lora_info(prompt, debug=debug or verbose_debug)
             pnginfo_dict.update(lora_info)
             
             # 5. Extract image size
-            size_info = MetadataUtils._extract_size_info(prompt)
+            if debug or verbose_debug:
+                print(f"[MetadataUtils DEBUG] Step 5: Extracting image size...")
+            size_info = MetadataUtils._extract_size_info(prompt, debug=debug or verbose_debug)
             pnginfo_dict.update(size_info)
             
             print(f"[MetadataUtils] ✅ Extracted metadata with {len(pnginfo_dict)} fields")
+            
+            if debug or verbose_debug:
+                print("\n[MetadataUtils DEBUG] FINAL EXTRACTED METADATA:")
+                for key, value in pnginfo_dict.items():
+                    value_short = value[:80] + "..." if len(str(value)) > 80 else value
+                    print(f"  {key}: {value_short}")
             
         except Exception as e:
             print(f"[MetadataUtils] ⚠️ Error extracting metadata: {e}")
@@ -61,12 +146,15 @@ class MetadataUtils:
         return pnginfo_dict
     
     @staticmethod
-    def _extract_prompts_from_workflow(prompt):
+    def _extract_prompts_from_workflow(prompt, debug=False):
         """Extract positive and negative prompts from workflow"""
         prompts = {"positive": "", "negative": ""}
         
         if not prompt:
             return prompts
+        
+        if debug:
+            print("  📝 Looking for CLIPTextEncode nodes...")
         
         clip_nodes = []
         
@@ -78,11 +166,18 @@ class MetadataUtils:
             if class_type == "CLIPTextEncode":
                 text = inputs.get("text", "")
                 if text:
-                    clip_nodes.append({
-                        "node_id": node_id,
-                        "text": text,
-                        "length": len(str(text))
-                    })
+                    # Convert text to string - can be str or list
+                    if isinstance(text, list):
+                        text = " ".join(str(t) for t in text if t)
+                    else:
+                        text = str(text)
+                    
+                    if text.strip():
+                        clip_nodes.append({
+                            "node_id": node_id,
+                            "text": text,
+                            "length": len(text)
+                        })
         
         if not clip_nodes:
             return prompts
@@ -125,6 +220,15 @@ class MetadataUtils:
                 prompts["negative"] = clip_nodes[1]["text"]
             print(f"[MetadataUtils] 📝 Found {len(clip_nodes)} prompt node(s)")
         
+        if debug:
+            print(f"  ✓ Prompts extracted:")
+            if prompts["positive"]:
+                pos_short = prompts["positive"][:60] + "..." if len(prompts["positive"]) > 60 else prompts["positive"]
+                print(f"    Positive: {pos_short}")
+            if prompts["negative"]:
+                neg_short = prompts["negative"][:60] + "..." if len(prompts["negative"]) > 60 else prompts["negative"]
+                print(f"    Negative: {neg_short}")
+        
         return prompts
     
     @staticmethod
@@ -157,12 +261,15 @@ class MetadataUtils:
         return ""
     
     @staticmethod
-    def _extract_sampling_parameters(prompt):
+    def _extract_sampling_parameters(prompt, debug=False):
         """Extract sampling parameters from workflow (seed, steps, cfg, etc.)"""
         params = {}
         
         if not prompt:
             return params
+        
+        if debug:
+            print("  ⚙️ Looking for KSampler node...")
         
         # Find KSampler or similar sampling nodes
         for node_id, node_data in prompt.items():
@@ -170,39 +277,77 @@ class MetadataUtils:
             inputs = node_data.get("inputs", {})
             
             if "sampler" in class_type.lower() or "ksampler" in class_type.lower():
+                # Helper function to safely extract values from lists or return as-is
+                def get_value(val):
+                    if isinstance(val, list):
+                        return val[0] if val else None
+                    return val
+                
                 # Extract all sampling parameters
-                seed = inputs.get("seed")
-                steps = inputs.get("steps")
-                cfg = inputs.get("cfg")
+                seed = get_value(inputs.get("seed"))
+                steps = get_value(inputs.get("steps"))
+                cfg = get_value(inputs.get("cfg"))
                 sampler_name = inputs.get("sampler_name")
                 scheduler = inputs.get("scheduler")
-                denoise = inputs.get("denoise")
+                denoise = get_value(inputs.get("denoise"))
                 
-                if steps is not None:
-                    params["Steps"] = str(int(steps))
+                # Convert list text fields to string
+                if isinstance(sampler_name, list):
+                    sampler_name = sampler_name[0] if sampler_name else None
+                if isinstance(scheduler, list):
+                    scheduler = scheduler[0] if scheduler else None
+                
+                # Safe type conversions with error handling
+                try:
+                    if steps is not None:
+                        params["Steps"] = str(int(steps))
+                except (ValueError, TypeError):
+                    pass
+                
                 if sampler_name:
                     params["Sampler"] = str(sampler_name)
+                
                 if scheduler:
                     params["Scheduler"] = str(scheduler)
-                if cfg is not None:
-                    params["CFG scale"] = str(float(cfg))
-                if seed is not None:
-                    params["Seed"] = str(int(seed))
+                
+                try:
+                    if cfg is not None:
+                        params["CFG scale"] = str(float(cfg))
+                except (ValueError, TypeError):
+                    pass
+                
+                try:
+                    if seed is not None:
+                        params["Seed"] = str(int(seed))
+                except (ValueError, TypeError):
+                    pass
+                
+                try:
+                    if denoise is not None and float(denoise) != 1.0:
+                        params["Denoising strength"] = str(float(denoise))
+                except (ValueError, TypeError):
+                    pass
                 if denoise is not None and float(denoise) != 1.0:
                     params["Denoising strength"] = str(float(denoise))
                 
                 print(f"[MetadataUtils] ⚙️ Found sampling parameters in node {node_id}")
                 break  # Use first sampler found
         
+        if debug:
+            print(f"  ✓ Sampling params extracted: {list(params.keys())}")
+        
         return params
     
     @staticmethod
-    def _extract_model_info(prompt):
+    def _extract_model_info(prompt, debug=False):
         """Extract model information from workflow"""
         model_info = {}
         
         if not prompt:
             return model_info
+        
+        if debug:
+            print("  🤖 Looking for model/VAE nodes...")
         
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
@@ -222,16 +367,25 @@ class MetadataUtils:
                     model_info["VAE"] = os.path.splitext(os.path.basename(vae_name))[0]
                     print(f"[MetadataUtils] 🎨 Found VAE: {model_info['VAE']}")
         
+        if debug:
+            if "Model" in model_info:
+                print(f"  ✓ Model: {model_info['Model']}")
+            if "VAE" in model_info:
+                print(f"  ✓ VAE: {model_info['VAE']}")
+        
         return model_info
     
     @staticmethod
-    def _extract_lora_info(prompt):
+    def _extract_lora_info(prompt, debug=False):
         """Extract LoRA information from workflow"""
         lora_info = {}
         loras = []
         
         if not prompt:
             return lora_info
+        
+        if debug:
+            print("  🔗 Looking for LoRA nodes...")
         
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
@@ -253,15 +407,24 @@ class MetadataUtils:
         if loras:
             lora_info["Lora hashes"] = ", ".join(loras)
         
+        if debug:
+            if loras:
+                print(f"  ✓ LoRAs found: {loras}")
+            else:
+                print(f"  ✓ No LoRA nodes found")
+        
         return lora_info
     
     @staticmethod
-    def _extract_size_info(prompt):
+    def _extract_size_info(prompt, debug=False):
         """Extract image size information from workflow"""
         size_info = {}
         
         if not prompt:
             return size_info
+        
+        if debug:
+            print("  📐 Looking for image size...")
         
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
@@ -276,6 +439,10 @@ class MetadataUtils:
                     size_info["Size"] = f"{width}x{height}"
                     print(f"[MetadataUtils] 📐 Found image size: {width}x{height}")
                     break
+        
+        if debug:
+            if "Size" in size_info:
+                print(f"  ✓ Size: {size_info['Size']}")
         
         return size_info
     
