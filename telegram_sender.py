@@ -6,7 +6,7 @@ import time
 import json
 import sys
 sys.path.append("../../")
-import folder_paths
+import folder_paths # type: ignore
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
@@ -363,12 +363,15 @@ class TelegramSender:
                 
                 # Build A1111-style metadata string
                 if pnginfo_dict:
-                    metadata_text = MetadataUtils.build_a1111_style_metadata(pnginfo_dict)
-                    
-                    # If we got valid metadata, use it
-                    if metadata_text and metadata_text.strip():
-                        print(f"[TelegramSender] ✅ Using enhanced metadata extraction")
-                        return metadata_text
+                    try:
+                        metadata_text = MetadataUtils.build_a1111_style_metadata(pnginfo_dict)
+                        
+                        # If we got valid metadata, use it
+                        if metadata_text and metadata_text.strip():
+                            print(f"[TelegramSender] ✅ Using enhanced metadata extraction")
+                            return metadata_text
+                    except Exception as e:
+                        print(f"[TelegramSender] ⚠️ Enhanced metadata building failed: {e}")
                 
             except Exception as e:
                 print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
@@ -386,9 +389,12 @@ class TelegramSender:
         
         # Try to extract additional parameters from workflow
         if prompt_dict:
-            params = self._extract_parameters_from_workflow(prompt_dict)
-            if params:
-                parts.append(params)
+            try:
+                params = self._extract_parameters_from_workflow(prompt_dict)
+                if params:
+                    parts.append(params)
+            except Exception as e:
+                print(f"[TelegramSender] ⚠️ Parameter extraction failed: {e}")
         
         return "\n".join(parts)
 
@@ -467,13 +473,16 @@ class TelegramSender:
                 pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
                 
                 if pnginfo_dict:
-                    enhanced_loras = MetadataUtils.extract_loras_from_metadata(pnginfo_dict)
-                    for lora_info in enhanced_loras:
-                        lora_name = lora_info.get('name', '')
-                        if lora_name:
-                            loras.append(lora_name.lower())
-                    print(f"[TelegramSender] ✅ Enhanced LoRA extraction found {len(loras)} LoRAs")
-                    return loras
+                    try:
+                        enhanced_loras = MetadataUtils.extract_loras_from_metadata(pnginfo_dict)
+                        for lora_info in enhanced_loras:
+                            lora_name = lora_info.get('name', '')
+                            if lora_name:
+                                loras.append(lora_name.lower())
+                        print(f"[TelegramSender] ✅ Enhanced LoRA extraction found {len(loras)} LoRAs")
+                        return loras
+                    except Exception as e:
+                        print(f"[TelegramSender] ⚠️ Enhanced LoRA processing failed: {e}")
         
         except Exception as e:
             print(f"[TelegramSender] ⚠️ Enhanced LoRA extraction failed: {e}")

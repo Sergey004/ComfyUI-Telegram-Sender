@@ -185,32 +185,122 @@ class MetadataUtils:
         if not pnginfo_dict:
             return loras
         
-        # Extract LoRA hashes string
-        lora_hashes_str = pnginfo_dict.get("Lora hashes", "")
+        # Extract LoRA hashes value - handle complex types safely
+        lora_hashes_value = pnginfo_dict.get("Lora hashes", "")
+        lora_hashes_str = ""
+        
+        def safe_convert_to_string(value):
+            """Safely convert any value to string representation"""
+            if value is None:
+                return ""
+            
+            # Handle string types
+            if isinstance(value, str):
+                return value.strip()
+            
+            # Handle numeric types
+            if isinstance(value, (int, float)):
+                return str(value)
+            
+            # Handle list types with proper flattening
+            if isinstance(value, list):
+                try:
+                    # Flatten nested lists recursively
+                    def flatten(items):
+                        flattened = []
+                        for item in items:
+                            if isinstance(item, list):
+                                flattened.extend(flatten(item))
+                            else:
+                                # Convert each item to string safely with comprehensive handling
+                                try:
+                                    if item is None:
+                                        continue
+                                    elif isinstance(item, str):
+                                        flattened.append(item.strip())
+                                    elif isinstance(item, (int, float)):
+                                        flattened.append(str(item))
+                                    elif isinstance(item, dict):
+                                        # Handle dict items specially
+                                        dict_str = safe_convert_to_string(item)
+                                        if dict_str:
+                                            flattened.append(dict_str)
+                                    else:
+                                        # Use repr for other complex types
+                                        flattened.append(repr(item))
+                                except Exception as e:
+                                    # If any item conversion fails, skip it and log the error
+                                    print(f"[safe_convert_to_string] ⚠️ Error converting item {item}: {e}")
+                                    continue
+                        return flattened
+                    
+                    flattened_items = flatten(value)
+                    # Join with commas, but avoid empty strings
+                    non_empty_items = [item for item in flattened_items if item]
+                    return ", ".join(non_empty_items) if non_empty_items else ""
+                except Exception as e:
+                    # Fallback: use repr for complex structures
+                    print(f"[safe_convert_to_string] ⚠️ Error processing list {value}: {e}")
+                    return repr(value)
+            
+            # Handle dictionary and other complex types
+            if isinstance(value, dict):
+                try:
+                    # Convert dict to string representation
+                    items = []
+                    for k, v in value.items():
+                        key_str = safe_convert_to_string(k)
+                        val_str = safe_convert_to_string(v)
+                        if key_str and val_str:
+                            items.append(f"{key_str}: {val_str}")
+                    return ", ".join(items) if items else ""
+                except Exception:
+                    return repr(value)
+            
+            # Handle other types with repr as fallback
+            try:
+                return str(value)
+            except Exception:
+                return repr(value)
+        
+        # Convert lora_hashes_value to string safely
+        lora_hashes_str = safe_convert_to_string(lora_hashes_value)
+        
         if lora_hashes_str:
             # Parse format: "Lora_Name_1: hash1, Lora_Name_2: hash2"
             lora_entries = lora_hashes_str.replace('"', '').split(', ')
             for entry in lora_entries:
                 if ':' in entry:
-                    lora_name, lora_hash = entry.split(':', 1)
-                    loras.append({
-                        'name': lora_name.strip(),
-                        'hash': lora_hash.strip()
-                    })
+                    try:
+                        lora_name, lora_hash = entry.split(':', 1)
+                        loras.append({
+                            'name': lora_name.strip(),
+                            'hash': lora_hash.strip()
+                        })
+                    except Exception as e:
+                        print(f"[MetadataUtils] ⚠️ Error parsing LoRA entry '{entry}': {e}")
+                        continue
         
         # Also check for LoRA strings in positive prompt
         positive_prompt = pnginfo_dict.get("Positive prompt", "")
         if positive_prompt:
-            # Regex to match <lora:name:weight> or <lyco:name:weight>
-            lora_pattern = re.compile(r"<(lora|lyco):([a-zA-Z0-9_\./\\-]+):([0-9.]+)>")
-            matches = lora_pattern.findall(positive_prompt)
-            
-            for tag, name, weight in matches:
-                loras.append({
-                    'name': name.strip(),
-                    'weight': float(weight),
-                    'type': tag
-                })
+            # Ensure positive_prompt is a string before processing
+            positive_prompt_str = safe_convert_to_string(positive_prompt)
+            if positive_prompt_str:
+                # Regex to match <lora:name:weight> or <lyco:name:weight>
+                lora_pattern = re.compile(r"<(lora|lyco):([a-zA-Z0-9_\./\\-]+):([0-9.]+)>")
+                matches = lora_pattern.findall(positive_prompt_str)
+                
+                for tag, name, weight in matches:
+                    try:
+                        loras.append({
+                            'name': name.strip(),
+                            'weight': float(weight),
+                            'type': tag
+                        })
+                    except Exception as e:
+                        print(f"[MetadataUtils] ⚠️ Error parsing LoRA prompt entry '{name}': {e}")
+                        continue
         
         return loras
     

@@ -146,14 +146,24 @@ class Capture:
         # LoRA information
         lora_names = inputs_before_sampler_node.get(MetaField.LORA_MODEL_NAME, [])
         lora_strengths = inputs_before_sampler_node.get(MetaField.LORA_STRENGTH_MODEL, [])
-        
+
         loras = []
-        for i, (lora_name, lora_strength) in enumerate(zip(lora_names, lora_strengths)):
-            if i < len(lora_strengths):
-                clean_name = os.path.splitext(os.path.basename(lora_name[1]))[0]
-                strength = lora_strengths[i][1] if i < len(lora_strengths) else 1.0
-                loras.append(f"{clean_name}: {strength}")
-        
+        for i in range(min(len(lora_names), len(lora_strengths))):
+            lora_name_tuple = lora_names[i]
+            lora_strength_tuple = lora_strengths[i]
+            
+            # Extract values from tuples (node_id, value)
+            lora_name_value = lora_name_tuple[1] if isinstance(lora_name_tuple, tuple) and len(lora_name_tuple) > 1 else lora_name_tuple
+            lora_strength_value = lora_strength_tuple[1] if isinstance(lora_strength_tuple, tuple) and len(lora_strength_tuple) > 1 else lora_strength_tuple
+            
+            # Ensure both values are strings before processing
+            lora_name_str = str(lora_name_value) if lora_name_value is not None else ""
+            lora_strength_str = str(lora_strength_value) if lora_strength_value is not None else "1.0"
+            
+            if lora_name_str:
+                clean_name = os.path.splitext(os.path.basename(lora_name_str))[0]
+                loras.append(f"{clean_name}: {lora_strength_str}")
+
         if loras:
             pnginfo["Lora hashes"] = f'"{", ".join(loras)}"'
         
@@ -177,24 +187,93 @@ class Capture:
         # Add positive prompt
         positive_prompt = pnginfo_dict.get("Positive prompt", "")
         if positive_prompt:
-            parts.append(positive_prompt)
+            # Ensure positive_prompt is a string
+            positive_prompt_str = str(positive_prompt) if not isinstance(positive_prompt, str) else positive_prompt
+            parts.append(positive_prompt_str)
         
         # Add negative prompt
         negative_prompt = pnginfo_dict.get("Negative prompt", "")
         if negative_prompt:
-            parts.append(f"Negative prompt: {negative_prompt}")
+            # Ensure negative_prompt is a string
+            negative_prompt_str = str(negative_prompt) if not isinstance(negative_prompt, str) else negative_prompt
+            parts.append(f"Negative prompt: {negative_prompt_str}")
         
         # Add parameters
         params_list = []
         for key, value in pnginfo_dict.items():
             if key not in ["Positive prompt", "Negative prompt"] and value:
-                # Ensure value is converted to string properly
-                if isinstance(value, list):
-                    # Convert list to string representation
-                    value_str = ", ".join(str(item) for item in value)
-                else:
-                    value_str = str(value)
-                params_list.append(f"{key}: {value_str}")
+                # Robust value conversion with comprehensive type handling
+                def safe_convert_to_string(value):
+                    """Safely convert any value to string representation"""
+                    if value is None:
+                        return ""
+                    
+                    # Handle string types - always convert to string
+                    if isinstance(value, str):
+                        return value.strip()
+                    
+                    # Handle numeric types - convert to string
+                    if isinstance(value, (int, float)):
+                        return str(value)
+                    
+                    # Handle list types with proper flattening
+                    if isinstance(value, list):
+                        try:
+                            # Flatten nested lists recursively
+                            def flatten(items):
+                                flattened = []
+                                for item in items:
+                                    if isinstance(item, list):
+                                        flattened.extend(flatten(item))
+                                    else:
+                                        # Convert each item to string safely with comprehensive handling
+                                        try:
+                                            if item is None:
+                                                continue
+                                            # Always convert to string regardless of type
+                                            item_str = safe_convert_to_string(item)
+                                            if item_str:
+                                                flattened.append(item_str)
+                                        except Exception as e:
+                                            # If any item conversion fails, skip it and log the error
+                                            print(f"[safe_convert_to_string] ⚠️ Error converting item {item}: {e}")
+                                            continue
+                                return flattened
+                            
+                            flattened_items = flatten(value)
+                            # Join with commas, but avoid empty strings
+                            non_empty_items = [item for item in flattened_items if item]
+                            return ", ".join(non_empty_items) if non_empty_items else ""
+                        except Exception as e:
+                            # Fallback: use repr for complex structures
+                            print(f"[safe_convert_to_string] ⚠️ Error processing list {value}: {e}")
+                            return repr(value)
+                    
+                    # Handle dictionary and other complex types
+                    if isinstance(value, dict):
+                        try:
+                            # Convert dict to string representation
+                            items = []
+                            for k, v in value.items():
+                                key_str = safe_convert_to_string(k)
+                                val_str = safe_convert_to_string(v)
+                                if key_str and val_str:
+                                    items.append(f"{key_str}: {val_str}")
+                            return ", ".join(items) if items else ""
+                        except Exception:
+                            return repr(value)
+                    
+                    # Handle other types - always convert to string
+                    try:
+                        return str(value)
+                    except Exception:
+                        return repr(value)
+                
+                value_str = safe_convert_to_string(value)
+                if value_str:  # Only add non-empty values
+                    # Ensure value_str is a string before using it
+                    value_str = str(value_str) if not isinstance(value_str, str) else value_str
+                    params_list.append(f"{key}: {value_str}")
         
         if params_list:
             parts.append(", ".join(params_list))
