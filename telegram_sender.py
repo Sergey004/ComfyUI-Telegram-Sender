@@ -4,10 +4,14 @@ import requests
 import threading
 import time
 import json
-import folder_paths
+import folder_paths # type: ignore
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
+
+# Import metadata utilities
+from metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
 
 # Config file path
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -52,6 +56,11 @@ class TelegramConfig:
                     "default": config.get("default_chat_id", ""),
                     "multiline": False
                 }),
+                "lora_mapping": ("STRING", {
+                    "default": config.get("lora_mapping", ""),
+                    "multiline": True,
+                    "tooltip": "LoRA to channel mapping (one per line): lora_name:chat_id"
+                }),
             }
         }
 
@@ -59,12 +68,13 @@ class TelegramConfig:
     FUNCTION = "save_config"
     OUTPUT_NODE = True
     CATEGORY = "image/telegram"
-    DESCRIPTION = "Configure Telegram bot token and default chat ID. Token is stored securely in a config file."
+    DESCRIPTION = "Configure Telegram bot token, default chat ID and LoRA mapping. Token is stored securely in a config file."
 
-    def save_config(self, bot_token, default_chat_id):
+    def save_config(self, bot_token, default_chat_id, lora_mapping):
         config = {
             "bot_token": bot_token.strip(),
-            "default_chat_id": default_chat_id.strip()
+            "default_chat_id": default_chat_id.strip(),
+            "lora_mapping": lora_mapping.strip()
         }
         
         if save_config(config):
@@ -101,11 +111,17 @@ class TelegramSender:
                     "multiline": False,
                     "tooltip": "Override token from config (optional)"
                 }),
-                "prompt": ("STRING", {
-                    "default": "", 
+                "positive_prompt": ("STRING", {
+                    "default": "",
                     "multiline": True,
                     "forceInput": True,
-                    "tooltip": "Prompt text to save in metadata"
+                    "tooltip": "Positive prompt text"
+                }),
+                "negative_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "forceInput": True,
+                    "tooltip": "Negative prompt text"
                 }),
                 "send_as_document": ("BOOLEAN", {
                     "default": False,
@@ -139,6 +155,10 @@ class TelegramSender:
                     "multiline": False,
                     "tooltip": "Fallback channel if no chat_id specified"
                 }),
+                "enable_lora_routing": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Enable automatic routing based on LoRA mapping from config"
+                }),
                 "retry_count": ("INT", {
                     "default": 3,
                     "min": 1,
@@ -151,6 +171,14 @@ class TelegramSender:
                     "max": 60,
                     "tooltip": "Delay between retries (seconds)"
                 }),
+                "enable_enhanced_metadata": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Use enhanced metadata extraction from comfyui_image_metadata_extension"
+                }),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
             }
         }
 
@@ -161,11 +189,15 @@ class TelegramSender:
     CATEGORY = "image/telegram"
     DESCRIPTION = "Sends generated images to Telegram. Configure bot token using TelegramConfig node first."
 
-    def send_to_telegram(self, images, chat_id="", bot_token_override="", prompt="", 
+    def send_to_telegram(self, images, chat_id="", bot_token_override="", 
+                        positive_prompt="", negative_prompt="",
                         send_as_document=False, max_size=2560, 
                         landscape_max_width=5120, enable_nsfw_detection=False,
                         nsfw_channel_id="", unsorted_channel_id="",
-                        retry_count=3, retry_delay=5):
+                        enable_lora_routing=True,
+                        retry_count=3, retry_delay=5,
+                        enable_enhanced_metadata=True,
+                        prompt=None, extra_pnginfo=None):
         
         # Get bot token from override or config
         config = load_config()
@@ -184,6 +216,14 @@ class TelegramSender:
             print("[TelegramSender] ⚠️ No chat ID provided. Skipping send.")
             return (images,)
 
+        # Extract metadata from workflow
+        metadata_text = self._build_metadata_text(
+            positive_prompt, negative_prompt, prompt, extra_pnginfo, enable_enhanced_metadata
+        )
+        
+        # Extract LoRAs from workflow for routing (using enhanced extraction)
+        loras_in_workflow = self._extract_loras_from_workflow(prompt, extra_pnginfo, enable_enhanced_metadata) if prompt else []
+
         # Process each image
         for i, image in enumerate(images):
             try:
@@ -197,23 +237,42 @@ class TelegramSender:
                     f"telegram_temp_{int(time.time())}_{i}.png"
                 )
                 
-                # Add prompt as metadata if provided
-                if prompt:
+                # Add metadata to PNG
+                pnginfo = PngInfo()
+                if metadata_text:
+                    pnginfo.add_text("parameters", metadata_text)
+                
+                # Add workflow info if available
+                if prompt is not None:
+                    pnginfo.add_text("prompt", json.dumps(prompt))
+                
+                # Add enhanced metadata if available and enabled
+                if enable_enhanced_metadata:
                     try:
-                        from PIL.PngImagePlugin import PngInfo
-                        metadata = PngInfo()
-                        metadata.add_text("parameters", prompt)
-                        pil_image.save(temp_path, "PNG", pnginfo=metadata)
+                        pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt, extra_pnginfo)
+                        
+                        if pnginfo_dict:
+                            # Add comprehensive metadata fields
+                            for key, value in pnginfo_dict.items():
+                                if value and isinstance(value, (str, int, float)):
+                                    pnginfo.add_text(key, str(value))
+                            print(f"[TelegramSender] ✅ Enhanced metadata embedded in PNG")
+                    
                     except Exception as e:
-                        print(f"[TelegramSender] Could not save metadata: {e}")
-                        pil_image.save(temp_path, "PNG")
-                else:
-                    pil_image.save(temp_path, "PNG")
+                        print(f"[TelegramSender] ⚠️ Enhanced metadata embedding failed: {e}")
+                
+                # Add original workflow info
+                if extra_pnginfo is not None:
+                    for key, value in extra_pnginfo.items():
+                        pnginfo.add_text(key, json.dumps(value) if isinstance(value, dict) else str(value))
+                
+                pil_image.save(temp_path, "PNG", pnginfo=pnginfo)
                 
                 # Determine target chat_id
                 target_chat_id = self._determine_chat_id(
-                    chat_id, prompt, enable_nsfw_detection, 
-                    nsfw_channel_id, unsorted_channel_id
+                    chat_id, positive_prompt, negative_prompt, 
+                    enable_nsfw_detection, nsfw_channel_id, unsorted_channel_id,
+                    enable_lora_routing, loras_in_workflow
                 )
                 
                 if not target_chat_id:
@@ -221,21 +280,28 @@ class TelegramSender:
                     self._cleanup_file(temp_path)
                     continue
                 
-                # Resize if needed
-                processed_path = self._resize_image(temp_path, max_size, landscape_max_width)
-                
-                # Compress if too large and not sending as document
-                if not send_as_document:
+                # Determine which file to send
+                if send_as_document:
+                    # Send original PNG without any processing
+                    file_to_send = temp_path
+                    print(f"[TelegramSender] 📄 Sending as document (original PNG, no resize)")
+                else:
+                    # Resize if needed for photo
+                    processed_path = self._resize_image(temp_path, max_size, landscape_max_width)
+                    
+                    # Compress if too large
                     try:
                         if os.path.getsize(processed_path) > 10 * 1024 * 1024:
                             processed_path = self._compress_image(processed_path)
                     except Exception as e:
                         print(f"[TelegramSender] Compression check failed: {e}")
+                    
+                    file_to_send = processed_path
                 
                 # Send in background thread
                 threading.Thread(
                     target=self._send_telegram_request,
-                    args=(processed_path, target_chat_id, bot_token, 
+                    args=(file_to_send, target_chat_id, bot_token, 
                           send_as_document, temp_path, retry_count, retry_delay),
                     daemon=True
                 ).start()
@@ -246,26 +312,202 @@ class TelegramSender:
         
         return (images,)
 
-    def _determine_chat_id(self, default_chat_id, prompt, enable_nsfw, 
-                          nsfw_channel_id, unsorted_channel_id):
+    def _build_metadata_text(self, positive_prompt, negative_prompt, prompt_dict, extra_pnginfo, enable_enhanced=True):
+        """Build A1111-style metadata text using custom metadata extraction"""
+        
+        # Use the enhanced metadata extraction if available and enabled
+        if enable_enhanced and prompt_dict:
+            try:
+                # Extract comprehensive metadata using custom implementation
+                pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
+                
+                # Build A1111-style metadata string
+                if pnginfo_dict:
+                    metadata_text = MetadataUtils.build_a1111_style_metadata(pnginfo_dict)
+                    
+                    # If we got valid metadata, use it
+                    if metadata_text and metadata_text.strip():
+                        print(f"[TelegramSender] ✅ Using enhanced metadata extraction")
+                        return metadata_text
+                
+            except Exception as e:
+                print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
+        
+        # Fallback to original method if enhanced extraction fails
+        parts = []
+        
+        # Add positive prompt
+        if positive_prompt:
+            parts.append(positive_prompt)
+        
+        # Add negative prompt
+        if negative_prompt:
+            parts.append(f"Negative prompt: {negative_prompt}")
+        
+        # Try to extract additional parameters from workflow
+        if prompt_dict:
+            params = self._extract_parameters_from_workflow(prompt_dict)
+            if params:
+                parts.append(params)
+        
+        return "\n".join(parts)
+
+    def _extract_parameters_from_workflow(self, prompt_dict):
+        """Extract generation parameters from ComfyUI workflow"""
+        params = []
+        
+        try:
+            # Search for KSampler nodes to get seed, steps, cfg, etc.
+            for node_id, node_data in prompt_dict.items():
+                class_type = node_data.get("class_type", "")
+                
+                if "sampler" in class_type.lower() or "ksampler" in class_type.lower():
+                    inputs = node_data.get("inputs", {})
+                    
+                    seed = inputs.get("seed")
+                    steps = inputs.get("steps")
+                    cfg = inputs.get("cfg")
+                    sampler_name = inputs.get("sampler_name")
+                    scheduler = inputs.get("scheduler")
+                    denoise = inputs.get("denoise")
+                    
+                    if steps:
+                        params.append(f"Steps: {steps}")
+                    if sampler_name:
+                        params.append(f"Sampler: {sampler_name}")
+                    if scheduler:
+                        params.append(f"Schedule type: {scheduler}")
+                    if cfg:
+                        params.append(f"CFG scale: {cfg}")
+                    if seed is not None:
+                        params.append(f"Seed: {seed}")
+                    if denoise is not None and denoise != 1.0:
+                        params.append(f"Denoising strength: {denoise}")
+                    
+                    break  # Use first sampler found
+                
+                # Look for model loader
+                if "checkpointloader" in class_type.lower():
+                    inputs = node_data.get("inputs", {})
+                    model_name = inputs.get("ckpt_name")
+                    if model_name:
+                        params.append(f"Model: {model_name}")
+                
+                # Look for VAE
+                if "vaeloader" in class_type.lower():
+                    inputs = node_data.get("inputs", {})
+                    vae_name = inputs.get("vae_name")
+                    if vae_name:
+                        params.append(f"VAE: {vae_name}")
+                
+                # Look for LoRAs
+                if "lora" in class_type.lower():
+                    inputs = node_data.get("inputs", {})
+                    lora_name = inputs.get("lora_name")
+                    strength = inputs.get("strength_model", inputs.get("strength", 1.0))
+                    if lora_name:
+                        params.append(f"Lora: {lora_name}: {strength}")
+        
+        except Exception as e:
+            print(f"[TelegramSender] Error extracting parameters: {e}")
+        
+        return ", ".join(params) if params else ""
+
+    def _extract_loras_from_workflow(self, prompt_dict, extra_pnginfo=None, enable_enhanced=True):
+        """Extract list of LoRA names used in workflow using enhanced metadata extraction"""
+        loras = []
+        
+        try:
+            # Try enhanced metadata extraction first if enabled
+            if enable_enhanced and prompt_dict:
+                pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
+                
+                if pnginfo_dict:
+                    enhanced_loras = MetadataUtils.extract_loras_from_metadata(pnginfo_dict)
+                    for lora_info in enhanced_loras:
+                        lora_name = lora_info.get('name', '')
+                        if lora_name:
+                            loras.append(lora_name.lower())
+                    print(f"[TelegramSender] ✅ Enhanced LoRA extraction found {len(loras)} LoRAs")
+                    return loras
+        
+        except Exception as e:
+            print(f"[TelegramSender] ⚠️ Enhanced LoRA extraction failed: {e}")
+        
+        # Fallback to original method
+        try:
+            for node_id, node_data in prompt_dict.items():
+                class_type = node_data.get("class_type", "")
+                
+                if "lora" in class_type.lower():
+                    inputs = node_data.get("inputs", {})
+                    lora_name = inputs.get("lora_name")
+                    if lora_name:
+                        # Remove file extension and path
+                        clean_name = os.path.splitext(os.path.basename(lora_name))[0]
+                        loras.append(clean_name.lower())
+        
+        except Exception as e:
+            print(f"[TelegramSender] Error extracting LoRAs: {e}")
+        
+        return loras
+
+    def _parse_lora_mapping(self):
+        """Parse LoRA mapping from config"""
+        config = load_config()
+        mapping_str = config.get("lora_mapping", "")
+        
+        if not mapping_str:
+            return {}
+        
+        mapping = {}
+        for line in mapping_str.strip().split('\n'):
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            
+            try:
+                lora_key, chat_id = line.split(':', 1)
+                lora_key = lora_key.strip().lower()
+                chat_id = chat_id.strip()
+                
+                if lora_key and chat_id:
+                    mapping[lora_key] = chat_id
+            except:
+                continue
+        
+        return mapping
+
+    def _determine_chat_id(self, default_chat_id, positive_prompt, negative_prompt,
+                          enable_nsfw, nsfw_channel_id, unsorted_channel_id,
+                          enable_lora_routing, loras_in_workflow):
         """Determine which chat to send to based on content"""
         target_chat_id = default_chat_id
         
-        # NSFW detection
-        if enable_nsfw and nsfw_channel_id and prompt:
-            prompt_lower = prompt.lower()
+        # LoRA-based routing (highest priority after explicit chat_id)
+        if enable_lora_routing and not target_chat_id and loras_in_workflow:
+            lora_mapping = self._parse_lora_mapping()
             
-            # Check if NSFW is in negative prompt
-            if "negative prompt:" in prompt_lower:
-                parts = prompt_lower.split("negative prompt:", 1)
-                positive = parts[0]
-                negative = parts[1] if len(parts) > 1 else ""
-                
-                # If NSFW in positive but not in negative, redirect
-                if "nsfw" in positive and "nsfw" not in negative:
-                    print("[TelegramSender] 🔞 NSFW detected, redirecting to NSFW channel")
-                    target_chat_id = nsfw_channel_id
-            elif "nsfw" in prompt_lower:
+            if lora_mapping:
+                # Check each LoRA in workflow against mapping
+                for lora_in_workflow in loras_in_workflow:
+                    for lora_key, mapped_chat_id in lora_mapping.items():
+                        # Match if mapping key is substring of actual LoRA name
+                        if lora_key in lora_in_workflow:
+                            print(f"[TelegramSender] 🎯 LoRA routing: '{lora_in_workflow}' matched '{lora_key}' → {mapped_chat_id}")
+                            target_chat_id = mapped_chat_id
+                            break
+                    
+                    if target_chat_id:
+                        break
+        
+        # NSFW detection (overrides LoRA routing if NSFW found)
+        if enable_nsfw and nsfw_channel_id:
+            positive_lower = positive_prompt.lower() if positive_prompt else ""
+            negative_lower = negative_prompt.lower() if negative_prompt else ""
+            
+            # If NSFW in positive but not in negative, redirect
+            if "nsfw" in positive_lower and "nsfw" not in negative_lower:
                 print("[TelegramSender] 🔞 NSFW detected, redirecting to NSFW channel")
                 target_chat_id = nsfw_channel_id
         
@@ -345,8 +587,16 @@ class TelegramSender:
                     response = requests.post(url, data=data, files=files, timeout=30)
                 
                 if response.ok:
-                    print(f"[TelegramSender] ✅ Sent to {chat_id}")
-                    self._cleanup_files(image_path, original_path)
+                    file_size = os.path.getsize(image_path) / (1024 * 1024)  # MB
+                    file_type = "document" if as_document else "photo"
+                    print(f"[TelegramSender] ✅ Sent to {chat_id} as {file_type} ({file_size:.2f}MB)")
+                    
+                    # Clean up only temporary files, not the original if sent as document
+                    if as_document and image_path == original_path:
+                        # Don't delete original when sent as document
+                        pass
+                    else:
+                        self._cleanup_files(image_path, original_path if image_path != original_path else None)
                     return
                 else:
                     error_msg = response.json().get('description', response.text)
@@ -361,7 +611,10 @@ class TelegramSender:
                 time.sleep(retry_delay)
         
         print(f"[TelegramSender] ❌ Failed to send after {retry_count} attempts")
-        self._cleanup_files(image_path, original_path)
+        if as_document and image_path == original_path:
+            pass  # Don't delete original
+        else:
+            self._cleanup_files(image_path, original_path if image_path != original_path else None)
 
     def _cleanup_files(self, *paths):
         """Clean up temporary files"""

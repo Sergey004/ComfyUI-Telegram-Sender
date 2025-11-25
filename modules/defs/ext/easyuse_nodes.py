@@ -1,0 +1,97 @@
+# https://github.com/yolain/ComfyUI-Easy-Use
+from ..meta import MetaField
+
+# Simplified version without complex dependencies
+CAPTURE_FIELD_LIST = {
+    "easy fullLoader": {
+        MetaField.MODEL_NAME: {"field_name": "ckpt_name"},
+        MetaField.VAE_NAME: {"field_name": "vae_name"},
+        MetaField.CLIP_SKIP: {"field_name": "clip_skip"},
+        MetaField.POSITIVE_PROMPT: {"field_name": "positive"},
+        MetaField.NEGATIVE_PROMPT: {"field_name": "negative"},
+        MetaField.IMAGE_WIDTH: {"field_name": "empty_latent_width"},
+        MetaField.IMAGE_HEIGHT: {"field_name": "empty_latent_height"},
+        MetaField.LORA_MODEL_NAME: {"field_name": "lora_name"},
+        MetaField.LORA_STRENGTH_MODEL: {"field_name": "lora_model_strength"},
+        MetaField.LORA_STRENGTH_CLIP: {"field_name": "lora_clip_strength"},
+    },
+    "easy comfyLoader": {
+        MetaField.MODEL_NAME: {"field_name": "ckpt_name"},
+        MetaField.CLIP_SKIP: {"field_name": "clip_skip"},
+        MetaField.POSITIVE_PROMPT: {"field_name": "positive"},
+        MetaField.NEGATIVE_PROMPT: {"field_name": "negative"},
+        MetaField.IMAGE_WIDTH: {"field_name": "empty_latent_width"},
+        MetaField.IMAGE_HEIGHT: {"field_name": "empty_latent_height"},
+        MetaField.LORA_MODEL_NAME: {"field_name": "lora_name"},
+        MetaField.LORA_STRENGTH_MODEL: {"field_name": "lora_model_strength"},
+        MetaField.LORA_STRENGTH_CLIP: {"field_name": "lora_clip_strength"},
+    },
+    "easy fullkSampler": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSampling": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingAdvanced": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingCascade": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingCustom": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingDynamicCFG": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingLayerDiffusion": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingNoiseIn": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy preSamplingSdTurbo": {
+        MetaField.SEED: {"field_name": "seed"},
+        MetaField.STEPS: {"field_name": "steps"},
+        MetaField.CFG: {"field_name": "cfg"},
+        MetaField.SAMPLER_NAME: {"field_name": "sampler_name"},
+        MetaField.SCHEDULER: {"field_name": "scheduler"},
+    },
+    "easy loraStack": {
+        MetaField.LORA_MODEL_NAME: {"field_name": "lora_name"},
+        MetaField.LORA_STRENGTH_MODEL: {"field_name": "strength_model"},
+        MetaField.LORA_STRENGTH_CLIP: {"field_name": "strength_clip"},
+    },
+}
