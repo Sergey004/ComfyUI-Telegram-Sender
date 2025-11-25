@@ -11,6 +11,7 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
+from datetime import datetime
 
 # Import metadata utilities
 try:
@@ -181,6 +182,16 @@ class TelegramSender:
                     "default": True,
                     "tooltip": "Use enhanced metadata extraction from comfyui_image_metadata_extension"
                 }),
+                "filename_prefix": ("STRING", {
+                    "default": "telegram_%date%_%model%_%seed%",
+                    "multiline": False,
+                    "tooltip": "Filename prefix with placeholders: %date%, %seed%, %model%, %width%, %height%, %pprompt%, %nprompt%"
+                }),
+                "subdirectory_name": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": "Subdirectory for saving files (e.g., tg_temp). Leave empty for default output directory."
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -203,6 +214,8 @@ class TelegramSender:
                         enable_lora_routing=True,
                         retry_count=3, retry_delay=5,
                         enable_enhanced_metadata=True,
+                        filename_prefix="telegram_%date%_%model%_%seed%",
+                        subdirectory_name="",
                         prompt=None, extra_pnginfo=None):
         
         # Get bot token from override or config
@@ -237,11 +250,28 @@ class TelegramSender:
                 img_np = (255. * image.cpu().numpy()).astype(np.uint8)
                 pil_image = Image.fromarray(img_np)
                 
+                # Format filename and subdirectory
+                pnginfo_dict = {}
+                if enable_enhanced_metadata and prompt:
+                    try:
+                        pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt, extra_pnginfo)
+                    except Exception as e:
+                        print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
+                
+                # Format filename prefix
+                formatted_filename = self._format_filename(filename_prefix.strip(), pnginfo_dict)
+                if not formatted_filename:
+                    formatted_filename = f"telegram_temp_{int(time.time())}_{i}"
+                
+                # Handle subdirectory
+                save_dir = self.output_dir
+                if subdirectory_name.strip():
+                    formatted_subdir = self._format_filename(subdirectory_name.strip(), pnginfo_dict)
+                    save_dir = os.path.join(self.output_dir, formatted_subdir)
+                    os.makedirs(save_dir, exist_ok=True)
+                
                 # Save temporarily with metadata
-                temp_path = os.path.join(
-                    self.output_dir, 
-                    f"telegram_temp_{int(time.time())}_{i}.png"
-                )
+                temp_path = os.path.join(save_dir, f"{formatted_filename}.png")
                 
                 # Add metadata to PNG
                 pnginfo = PngInfo()
@@ -634,6 +664,67 @@ class TelegramSender:
         """Clean up temporary files"""
         for path in paths:
             self._cleanup_file(path)
+
+    def _format_filename(self, filename_template, pnginfo_dict):
+        """Format filename template with placeholders like comfyui_image_metadata_extension"""
+        if "%" not in filename_template:
+            return filename_template
+            
+        now = datetime.now()
+        date_table = {
+            "yyyy": f"{now.year}",
+            "MM": f"{now.month:02d}",
+            "dd": f"{now.day:02d}",
+            "hh": f"{now.hour:02d}",
+            "mm": f"{now.minute:02d}",
+            "ss": f"{now.second:02d}",
+        }
+        
+        pattern_format = re.compile(r"(%[^%]+%)")
+        segments = pattern_format.findall(filename_template)
+        
+        for segment in segments:
+            parts = segment.strip("%").split(":")
+            key = parts[0]
+
+            if key == "seed":
+                seed = pnginfo_dict.get("Seed", pnginfo_dict.get("seed", ""))
+                filename_template = filename_template.replace(segment, str(seed))
+
+            elif key == "width":
+                width = pnginfo_dict.get("Width", pnginfo_dict.get("width", ""))
+                filename_template = filename_template.replace(segment, str(width))
+
+            elif key == "height":
+                height = pnginfo_dict.get("Height", pnginfo_dict.get("height", ""))
+                filename_template = filename_template.replace(segment, str(height))
+
+            elif key == "pprompt":
+                prompt = pnginfo_dict.get("Positive prompt", pnginfo_dict.get("pprompt", ""))
+                length = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                prompt = prompt.replace("\n", " ")
+                filename_template = filename_template.replace(segment, prompt[:length].strip() if length else prompt.strip())
+
+            elif key == "nprompt":
+                prompt = pnginfo_dict.get("Negative prompt", pnginfo_dict.get("nprompt", ""))
+                length = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                prompt = prompt.replace("\n", " ")
+                filename_template = filename_template.replace(segment, prompt[:length].strip() if length else prompt.strip())
+
+            elif key == "model":
+                model = pnginfo_dict.get("Model", pnginfo_dict.get("model", ""))
+                if model:
+                    model = os.path.splitext(os.path.basename(model))[0]
+                length = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                filename_template = filename_template.replace(segment, model[:length] if length else model)
+
+            elif key == "date":
+                date_format = parts[1] if len(parts) > 1 else "yyyyMMddhhmmss"
+                for k, v in date_table.items():
+                    date_format = date_format.replace(k, v)
+                filename_template = filename_template.replace(segment, date_format)
+
+        return filename_template
 
     def _cleanup_file(self, path):
         """Clean up a single temporary file"""
