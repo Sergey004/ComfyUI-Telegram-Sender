@@ -304,17 +304,16 @@ class TelegramSender:
                 
                 # Add metadata to PNG
                 pnginfo = PngInfo()
-                if metadata_text:
-                    pnginfo.add_text("parameters", metadata_text)
-                
-                # Add workflow info if available
-                if prompt is not None:
-                    pnginfo.add_text("prompt", json.dumps(prompt))
                 
                 # Add enhanced metadata if available and enabled
                 if enable_enhanced_metadata and pnginfo_dict:
                     try:
-                        # Add comprehensive metadata fields
+                        # Generate A1111-style parameters string and add as main "parameters" field
+                        parameters_str = TelegramMetadata.get_parameters_str(pnginfo_dict)
+                        if parameters_str:
+                            pnginfo.add_text("parameters", parameters_str)
+                        
+                        # Also add individual metadata fields for tools that read them separately
                         for key, value in pnginfo_dict.items():
                             if value and isinstance(value, (str, int, float)):
                                 pnginfo.add_text(key, str(value))
@@ -322,6 +321,13 @@ class TelegramSender:
                     
                     except Exception as e:
                         print(f"[TelegramSender] ⚠️ Enhanced metadata embedding failed: {e}")
+                elif metadata_text:
+                    # Fallback to user-provided metadata if no enhanced metadata
+                    pnginfo.add_text("parameters", metadata_text)
+                
+                # Add workflow info if available
+                if prompt is not None:
+                    pnginfo.add_text("prompt", json.dumps(prompt))
                 
                 # Add original workflow info
                 if extra_pnginfo is not None:
