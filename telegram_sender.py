@@ -5,6 +5,7 @@ import threading
 import time
 import json
 import sys
+import socket
 sys.path.append("../../")
 import folder_paths # type: ignore
 from PIL import Image
@@ -12,6 +13,7 @@ from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import torch
 from datetime import datetime
+from urllib3.exceptions import ProtocolError
 
 # Import metadata wrapper based on comfyui_image_metadata_extension
 try:
@@ -710,17 +712,34 @@ class TelegramSender:
 
     def _send_telegram_request(self, image_path, chat_id, bot_token, 
                                as_document, original_path, retry_count, retry_delay):
-        """Send image to Telegram with retry logic"""
+        """Send image to Telegram with robust retry logic for connection and timeout issues"""
         method = "sendDocument" if as_document else "sendPhoto"
         param_name = "document" if as_document else "photo"
         url = f"https://api.telegram.org/bot{bot_token}/{method}"
+        
+        # Get file size for dynamic timeout calculation
+        try:
+            file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
+            # Estimate timeout: 1 second per MB + 30 seconds base (for slow connections)
+            # Minimum 60 seconds, maximum 300 seconds
+            estimated_timeout = max(60, min(300, 30 + int(file_size_mb * 1.5)))
+        except:
+            estimated_timeout = 60
         
         for attempt in range(retry_count):
             try:
                 with open(image_path, 'rb') as f:
                     files = {param_name: f}
                     data = {'chat_id': chat_id}
-                    response = requests.post(url, data=data, files=files, timeout=30)
+                    
+                    # Use estimated timeout based on file size
+                    response = requests.post(
+                        url, 
+                        data=data, 
+                        files=files, 
+                        timeout=(10, estimated_timeout),  # (connect_timeout, read_timeout)
+                        retries=0  # We handle retries manually
+                    )
                 
                 if response.ok:
                     file_size = os.path.getsize(image_path) / (1024 * 1024)  # MB
@@ -735,16 +754,42 @@ class TelegramSender:
                         self._cleanup_files(image_path, original_path if image_path != original_path else None)
                     return
                 else:
-                    error_msg = response.json().get('description', response.text)
+                    try:
+                        error_msg = response.json().get('description', response.text)
+                    except:
+                        error_msg = response.text
                     print(f"[TelegramSender] ❌ [{attempt+1}/{retry_count}] Error: {error_msg}")
                     
+            except requests.exceptions.ConnectTimeout:
+                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Connection timeout (establishing connection failed)")
+                
+            except requests.exceptions.ReadTimeout:
+                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Read timeout (server not responding)")
+                
             except requests.exceptions.Timeout:
-                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Timeout")
+                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Request timeout")
+                
+            except (socket.timeout, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # Socket-level errors
+                print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Socket error - connection interrupted, retrying...")
+                
+            except (requests.exceptions.ConnectionError, OSError, ProtocolError) as e:
+                # Catch "Connection aborted" and other socket errors
+                error_str = str(e)
+                if "Connection aborted" in error_str or "The write operation timed out" in error_str:
+                    print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Connection aborted/write timeout - retrying...")
+                elif "Connection reset" in error_str:
+                    print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Connection reset - retrying...")
+                else:
+                    print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Connection error: {e}")
+                
             except Exception as e:
                 print(f"[TelegramSender] ❌ [{attempt+1}/{retry_count}] Exception: {e}")
             
             if attempt < retry_count - 1:
-                time.sleep(retry_delay)
+                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                print(f"[TelegramSender] ⏳ Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
         
         print(f"[TelegramSender] ❌ Failed to send after {retry_count} attempts")
         if as_document and image_path == original_path:
