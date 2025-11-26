@@ -78,6 +78,18 @@ class TelegramConfig:
                     "multiline": True,
                     "tooltip": "LoRA to channel mapping (one per line): lora_name:chat_id"
                 }),
+            },
+            "optional": {
+                "nsfw_channel_id": ("STRING", {
+                    "default": config.get("nsfw_channel_id", ""),
+                    "multiline": False,
+                    "tooltip": "Channel ID for NSFW content"
+                }),
+                "unsorted_channel_id": ("STRING", {
+                    "default": config.get("unsorted_channel_id", ""),
+                    "multiline": False,
+                    "tooltip": "Default channel for unrouted images"
+                }),
             }
         }
 
@@ -85,13 +97,15 @@ class TelegramConfig:
     FUNCTION = "save_config"
     OUTPUT_NODE = True
     CATEGORY = "image/telegram"
-    DESCRIPTION = "Configure Telegram bot token, default chat ID and LoRA mapping. Token is stored securely in a config file."
+    DESCRIPTION = "Configure Telegram bot token, default chat ID, LoRA mapping and channel IDs. Token is stored securely in a config file."
 
-    def save_config(self, bot_token, default_chat_id, lora_mapping):
+    def save_config(self, bot_token, default_chat_id, lora_mapping, nsfw_channel_id="", unsorted_channel_id=""):
         config = {
             "bot_token": bot_token.strip(),
             "default_chat_id": default_chat_id.strip(),
-            "lora_mapping": lora_mapping.strip()
+            "lora_mapping": lora_mapping.strip(),
+            "nsfw_channel_id": nsfw_channel_id.strip(),
+            "unsorted_channel_id": unsorted_channel_id.strip()
         }
         
         if save_config(config):
@@ -163,14 +177,14 @@ class TelegramSender:
                     "tooltip": "Redirect to NSFW channel if 'nsfw' in prompt"
                 }),
                 "nsfw_channel_id": ("STRING", {
-                    "default": "",
+                    "default": config.get("nsfw_channel_id", ""),
                     "multiline": False,
-                    "tooltip": "Channel ID for NSFW content"
+                    "tooltip": "Channel ID for NSFW content (loads from config if empty)"
                 }),
                 "unsorted_channel_id": ("STRING", {
-                    "default": "",
+                    "default": config.get("unsorted_channel_id", ""),
                     "multiline": False,
-                    "tooltip": "Fallback channel if no chat_id specified"
+                    "tooltip": "Fallback channel if no chat_id specified (loads from config if empty)"
                 }),
                 "enable_lora_routing": ("BOOLEAN", {
                     "default": True,
