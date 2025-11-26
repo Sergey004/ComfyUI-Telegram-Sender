@@ -1,26 +1,33 @@
 import re
-import os
+import folder_paths
+from ..utils.hash import calc_hash
+from ..utils.embedding import get_embedding_file_path
 
-# Simplified formatters without ComfyUI dependencies
+cache_model_hash = {}
+
+# Generalized hash calculation for different folder types
+def calc_hash_for_type(folder_type, model_name):
+    try:
+        filename = folder_paths.get_full_path(folder_type, model_name)
+        return calc_hash(filename)
+    except Exception as e:
+        return ""  # Return empty string if unable to calculate hash
+
+# Replacing calc_model_hash, calc_vae_hash, calc_lora_hash, and calc_unet_hash
 def calc_model_hash(model_name, input_data=None):
-    """Simple hash calculation - returns filename without extension"""
-    return os.path.splitext(os.path.basename(model_name))[0]
+    return calc_hash_for_type("checkpoints", model_name)
 
 def calc_vae_hash(model_name, input_data=None):
-    """Simple hash calculation - returns filename without extension"""
-    return os.path.splitext(os.path.basename(model_name))[0]
+    return calc_hash_for_type("vae", model_name)
 
 def calc_lora_hash(model_name, input_data=None):
-    """Simple hash calculation - returns filename without extension"""
-    return os.path.splitext(os.path.basename(model_name))[0]
+    return calc_hash_for_type("loras", model_name)
 
 def calc_unet_hash(model_name, input_data=None):
-    """Simple hash calculation - returns filename without extension"""
-    return os.path.splitext(os.path.basename(model_name))[0]
+    return calc_hash_for_type("unet", model_name)
 
 def calc_upscale_hash(model_name, input_data=None):
-    """Simple hash calculation - returns filename without extension"""
-    return os.path.splitext(os.path.basename(model_name))[0]
+    return calc_hash_for_type("upscale_models", model_name)
 
 
 def convert_skip_clip(stop_at_clip_layer, input_data=None):
@@ -30,20 +37,12 @@ def convert_skip_clip(stop_at_clip_layer, input_data=None):
 SCALING_FACTOR = 8
 
 def get_scaled_width(scaled_by, input_data):
-    """Simplified scaling calculation"""
-    try:
-        samples = input_data[0]["samples"][0]["samples"]
-        return round(samples.shape[3] * scaled_by * SCALING_FACTOR)
-    except:
-        return 512  # Fallback value
+    samples = input_data[0]["samples"][0]["samples"]
+    return round(samples.shape[3] * scaled_by * SCALING_FACTOR)
 
 def get_scaled_height(scaled_by, input_data):
-    """Simplified scaling calculation"""
-    try:
-        samples = input_data[0]["samples"][0]["samples"]
-        return round(samples.shape[2] * scaled_by * SCALING_FACTOR)
-    except:
-        return 512  # Fallback value
+    samples = input_data[0]["samples"][0]["samples"]
+    return round(samples.shape[2] * scaled_by * SCALING_FACTOR)
 
 
 embedding_pattern = re.compile(r"embedding:\(?([^\s),]+)\)?")
@@ -56,5 +55,5 @@ def extract_embedding_names(text, input_data=None):
 
 def extract_embedding_hashes(text, input_data=None):
     names = extract_embedding_names(text)
-    # Return empty hashes for simplicity
-    return ["" for name in names]
+    hashes = [calc_hash(get_embedding_file_path(name)) or "" for name in names]
+    return hashes

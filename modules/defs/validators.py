@@ -28,8 +28,8 @@ def _get_node_id_list(prompt, field_name):
                     if "CLIPTextEncode" in class_type:
                         node_id_list[nid] = nid2
                         break
-    for k, v in prompt[nid2]["inputs"].items():
-        if isinstance(v, list) and v:
-            d.append(v[0])
+                    for k, v in prompt[nid2]["inputs"].items():
+                        if isinstance(v, list) and v:
+                            d.append(v[0])
 
     return list(node_id_list.values())

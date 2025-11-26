@@ -13,12 +13,22 @@ import numpy as np
 import torch
 from datetime import datetime
 
-# Import metadata utilities
+# Import metadata wrapper based on comfyui_image_metadata_extension
 try:
-    from .metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
-except ImportError:
-    # Fallback for direct execution
-    from metadata_utils import MetadataUtils, extract_metadata, build_metadata_text, format_telegram_metadata
+    from .telegram_metadata import TelegramMetadata
+except (ImportError, ModuleNotFoundError):
+    try:
+        from telegram_metadata import TelegramMetadata
+    except (ImportError, ModuleNotFoundError):
+        # Fallback if not available
+        class TelegramMetadata:
+            @staticmethod
+            def get_metadata(prompt, prefer_nearest=False):
+                return {}
+            
+            @staticmethod
+            def get_parameters_str(pnginfo_dict):
+                return ""
 
 # Config file path
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -192,6 +202,10 @@ class TelegramSender:
                     "multiline": False,
                     "tooltip": "Subdirectory for saving files (e.g., tg_temp). Leave empty for default output directory."
                 }),
+                "debug_metadata": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Enable debug output for metadata extraction (shows extraction steps in console)"
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -216,6 +230,7 @@ class TelegramSender:
                         enable_enhanced_metadata=True,
                         filename_prefix="telegram_%date%_%model%_%seed%",
                         subdirectory_name="",
+                        debug_metadata=False,
                         prompt=None, extra_pnginfo=None):
         
         # Get bot token from override or config
@@ -254,7 +269,7 @@ class TelegramSender:
                 pnginfo_dict = {}
                 if enable_enhanced_metadata and prompt:
                     try:
-                        pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt, extra_pnginfo)
+                        pnginfo_dict = TelegramMetadata.get_metadata(prompt)
                     except Exception as e:
                         print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
                 
@@ -283,16 +298,13 @@ class TelegramSender:
                     pnginfo.add_text("prompt", json.dumps(prompt))
                 
                 # Add enhanced metadata if available and enabled
-                if enable_enhanced_metadata:
+                if enable_enhanced_metadata and pnginfo_dict:
                     try:
-                        pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt, extra_pnginfo)
-                        
-                        if pnginfo_dict:
-                            # Add comprehensive metadata fields
-                            for key, value in pnginfo_dict.items():
-                                if value and isinstance(value, (str, int, float)):
-                                    pnginfo.add_text(key, str(value))
-                            print(f"[TelegramSender] ✅ Enhanced metadata embedded in PNG")
+                        # Add comprehensive metadata fields
+                        for key, value in pnginfo_dict.items():
+                            if value and isinstance(value, (str, int, float)):
+                                pnginfo.add_text(key, str(value))
+                        print(f"[TelegramSender] ✅ Enhanced metadata embedded in PNG")
                     
                     except Exception as e:
                         print(f"[TelegramSender] ⚠️ Enhanced metadata embedding failed: {e}")
@@ -359,12 +371,13 @@ class TelegramSender:
         if enable_enhanced and prompt_dict:
             try:
                 # Extract comprehensive metadata using custom implementation
-                pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
+                pnginfo_dict = {}  # Metadata extraction optional
                 
                 # Build A1111-style metadata string
                 if pnginfo_dict:
                     try:
-                        metadata_text = MetadataUtils.build_a1111_style_metadata(pnginfo_dict)
+                        # Format metadata for display
+                        metadata_text = "\n".join([f"{k}: {v}" for k, v in pnginfo_dict.items()])
                         
                         # If we got valid metadata, use it
                         if metadata_text and metadata_text.strip():
@@ -380,7 +393,7 @@ class TelegramSender:
         # But still use enhanced extraction for metadata if available
         try:
             if enable_enhanced and prompt_dict:
-                pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
+                pnginfo_dict = {}  # Metadata extraction optional
                 if pnginfo_dict:
                     # Use extracted metadata instead of passed prompts if extraction was successful
                     extracted_positive = pnginfo_dict.get("Positive prompt", positive_prompt)
@@ -484,54 +497,44 @@ class TelegramSender:
         """Extract list of LoRA names used in workflow using enhanced metadata extraction"""
         loras = []
         
-        try:
-            # Try enhanced metadata extraction first if enabled
-            if enable_enhanced and prompt_dict:
-                pnginfo_dict = MetadataUtils.extract_metadata_from_workflow(prompt_dict, extra_pnginfo)
+        if not prompt_dict:
+            return loras
+        
+        # Try enhanced metadata extraction first if enabled
+        if enable_enhanced:
+            try:
+                pnginfo_dict = TelegramMetadata.get_metadata(prompt_dict)
                 
-                if pnginfo_dict:
-                    try:
-                        enhanced_loras = MetadataUtils.extract_loras_from_metadata(pnginfo_dict)
-                        for lora_info in enhanced_loras:
-                            lora_name = lora_info.get('name', '')
-                            if lora_name:
-                                clean_lora_name = lora_name.lower().strip()
-                                loras.append(clean_lora_name)
-                        
-                        if loras:
-                            print(f"[TelegramSender] ✅ Enhanced LoRA extraction found {len(loras)} LoRAs: {loras}")
-                            return loras
-                        else:
-                            print(f"[TelegramSender] ⚠️ Enhanced extraction returned empty list, falling back to direct extraction")
-                    except Exception as e:
-                        print(f"[TelegramSender] ⚠️ Enhanced LoRA processing failed: {e}")
+                if pnginfo_dict and "Lora hashes" in pnginfo_dict:
+                    lora_str = pnginfo_dict["Lora hashes"]
+                    # Parse "name1: strength1, name2: strength2" format
+                    for part in lora_str.split(","):
+                        lora_name = part.split(":")[0].strip()
+                        if lora_name:
+                            loras.append(lora_name.lower().strip())
+                    
+                    if loras:
+                        print(f"[TelegramSender] ✅ Extracted {len(loras)} LoRAs from metadata")
+                        return loras
+            except Exception as e:
+                print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
         
-        except Exception as e:
-            print(f"[TelegramSender] ⚠️ Enhanced LoRA extraction failed: {e}")
-        
-        # Fallback to original method - direct workflow inspection
-        print(f"[TelegramSender] 🔍 Using fallback LoRA extraction from workflow nodes")
+        # Fallback: direct inspection for basic ComfyUI LoRA nodes
         try:
             for node_id, node_data in prompt_dict.items():
                 class_type = node_data.get("class_type", "")
                 
-                if "lora" in class_type.lower():
+                if "LoraLoader" in class_type:  # Standard ComfyUI LoRA node
                     inputs = node_data.get("inputs", {})
                     lora_name = inputs.get("lora_name")
                     if lora_name:
-                        # Remove file extension and path
                         clean_name = os.path.splitext(os.path.basename(lora_name))[0]
                         clean_name = clean_name.lower().strip()
-                        loras.append(clean_name)
-                        print(f"[TelegramSender] 📍 Found LoRA in node: {clean_name} (from {lora_name})")
+                        if clean_name not in loras:
+                            loras.append(clean_name)
         
         except Exception as e:
-            print(f"[TelegramSender] ❌ Error extracting LoRAs: {e}")
-        
-        if loras:
-            print(f"[TelegramSender] ✅ Extracted LoRAs from workflow: {loras}")
-        else:
-            print(f"[TelegramSender] ⚠️ No LoRAs found in workflow")
+            print(f"[TelegramSender] ⚠️ LoRA fallback extraction failed: {e}")
         
         return loras
 
