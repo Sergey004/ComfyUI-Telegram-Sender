@@ -4,9 +4,9 @@ EXACT copy of SaveImageWithMetaData.gen_pnginfo() from comfyui_image_metadata_ex
 """
 
 try:
-    from .modules import hook
-    from .modules.capture import Capture
-    from .modules.trace import Trace
+    from .telegram_modules import hook
+    from .telegram_modules.capture import Capture
+    from .telegram_modules.trace import Trace
     CAPTURE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
     CAPTURE_AVAILABLE = False
