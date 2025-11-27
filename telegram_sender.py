@@ -195,7 +195,7 @@ class TelegramSender:
                 "retry_count": ("INT", {
                     "default": 3,
                     "min": 1,
-                    "max": 10,
+                    "max": 99,
                     "tooltip": "Number of retry attempts on failure"
                 }),
                 "retry_delay": ("INT", {
@@ -242,12 +242,15 @@ class TelegramSender:
                         landscape_max_width=5120, enable_nsfw_detection=False,
                         nsfw_channel_id="", unsorted_channel_id="",
                         enable_lora_routing=True,
-                        retry_count=3, retry_delay=5,
+                        retry_count=99, retry_delay=5,
                         enable_enhanced_metadata=True,
                         filename_prefix="telegram_%date%_%model%_%seed%",
                         subdirectory_name="",
                         debug_metadata=False,
                         prompt=None, extra_pnginfo=None):
+        
+        # Log input parameters for debugging
+        print(f"[TelegramSender] 🔧 Parameters: retry_count={retry_count}, retry_delay={retry_delay}")
         
         # Get bot token from override or config
         config = load_config()
