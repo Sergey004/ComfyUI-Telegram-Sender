@@ -92,6 +92,9 @@ realistic:-1002222222222
 fantasy:-1003333333333
 ```
 
+
+
+
 Now:
 - If LoRA with "anime" in the name is used in workflow → sends to channel `-1001111111111`
 - If LoRA with "realistic" in the name is used → sends to channel `-1002222222222`
@@ -112,11 +115,15 @@ Now:
 
 **Important:** The token is stored locally in the extension folder and is NOT saved in the workflow file. This means you can safely share workflows with others without revealing your token.
 
+![alt text](assets/image1.png)
+
 ### Basic workflow
 
 1. Add the **📤 Send to Telegram** node to your workflow
 2. Connect the output of the image generation node to the **images** input
 3. Specify **chat_id** (or leave empty to use default from config)
+
+![alt text](image2.png)
 
 ### Example of simple workflow:
 
