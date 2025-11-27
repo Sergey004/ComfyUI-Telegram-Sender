@@ -123,7 +123,7 @@ Now:
 2. Connect the output of the image generation node to the **images** input
 3. Specify **chat_id** (or leave empty to use default from config)
 
-![alt text](image2.png)
+![alt text](assets/image2.png)
 
 ### Example of simple workflow:
 

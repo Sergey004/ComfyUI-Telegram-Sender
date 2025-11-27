@@ -737,8 +737,7 @@ class TelegramSender:
                         url, 
                         data=data, 
                         files=files, 
-                        timeout=(10, estimated_timeout),  # (connect_timeout, read_timeout)
-                        retries=0  # We handle retries manually
+                        timeout=(10, estimated_timeout)  # (connect_timeout, read_timeout)
                     )
                 
                 if response.ok:
