@@ -6,6 +6,7 @@ import time
 import json
 import sys
 import socket
+from queue import Queue, Empty
 sys.path.append("../../")
 import folder_paths # type: ignore
 from PIL import Image
@@ -14,6 +15,11 @@ import numpy as np
 import torch
 from datetime import datetime
 from urllib3.exceptions import ProtocolError
+
+# Global queue and semaphore for managing concurrent uploads
+# Limit to 2 simultaneous uploads to avoid overwhelming the connection
+_upload_semaphore = threading.Semaphore(2)
+_upload_lock = threading.Lock()
 
 # Import metadata wrapper based on comfyui_image_metadata_extension
 try:
@@ -363,6 +369,9 @@ class TelegramSender:
                 except Exception as e:
                     print(f"[TelegramSender] Compression check failed: {e}")
                 
+                # Ensure file is fully written to disk
+                self._ensure_file_synced(photo_path)
+                
                 # Send photo in background thread
                 threading.Thread(
                     target=self._send_telegram_request,
@@ -372,7 +381,14 @@ class TelegramSender:
                 ).start()
                 
                 # Optionally send as document (original PNG)
+                # Wait a bit before sending document to avoid overwhelming the connection
                 if send_as_document:
+                    # Ensure temp_path is synced before sending
+                    self._ensure_file_synced(temp_path)
+                    
+                    # Small delay to avoid simultaneous uploads
+                    time.sleep(2)
+                    
                     threading.Thread(
                         target=self._send_telegram_request,
                         args=(temp_path, target_chat_id, bot_token, 
@@ -716,9 +732,27 @@ class TelegramSender:
     def _send_telegram_request(self, image_path, chat_id, bot_token, 
                                as_document, original_path, retry_count, retry_delay):
         """Send image to Telegram with robust retry logic for connection and timeout issues"""
+        # Use semaphore to limit concurrent uploads
+        with _upload_semaphore:
+            self._send_telegram_request_impl(image_path, chat_id, bot_token, as_document, original_path, retry_count, retry_delay)
+
+    def _send_telegram_request_impl(self, image_path, chat_id, bot_token, 
+                                     as_document, original_path, retry_count, retry_delay):
+        """Implementation of send_telegram_request with actual upload logic"""
         method = "sendDocument" if as_document else "sendPhoto"
         param_name = "document" if as_document else "photo"
         url = f"https://api.telegram.org/bot{bot_token}/{method}"
+        
+        # Wait for file to be fully saved (with timeout)
+        max_wait = 30
+        wait_time = 0
+        while not os.path.exists(image_path) and wait_time < max_wait:
+            time.sleep(0.1)
+            wait_time += 0.1
+        
+        if not os.path.exists(image_path):
+            print(f"[TelegramSender] ❌ File not found after {max_wait}s: {image_path}")
+            return
         
         # Get file size for dynamic timeout calculation
         try:
@@ -726,6 +760,7 @@ class TelegramSender:
             # Estimate timeout: 1 second per MB + 30 seconds base (for slow connections)
             # Minimum 60 seconds, maximum 300 seconds
             estimated_timeout = max(60, min(300, 30 + int(file_size_mb * 1.5)))
+            print(f"[TelegramSender] 📁 File ready: {file_size_mb:.2f}MB (timeout: {estimated_timeout}s)")
         except:
             estimated_timeout = 60
         
@@ -789,7 +824,7 @@ class TelegramSender:
                 print(f"[TelegramSender] ❌ [{attempt+1}/{retry_count}] Exception: {e}")
             
             if attempt < retry_count - 1:
-                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                wait_time = retry_delay + (attempt * 5)  # Linear backoff: delay + (attempt * 5)
                 print(f"[TelegramSender] ⏳ Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
         
@@ -875,6 +910,32 @@ class TelegramSender:
                 os.remove(path)
             except Exception as e:
                 print(f"[TelegramSender] ⚠️ Could not delete {path}: {e}")
+
+    def _ensure_file_synced(self, file_path):
+        """Ensure file is fully written to disk by checking file stability"""
+        if not os.path.exists(file_path):
+            return
+        
+        try:
+            # Check file size twice with delay to ensure it's not still being written
+            size1 = os.path.getsize(file_path)
+            time.sleep(0.2)
+            size2 = os.path.getsize(file_path)
+            
+            # If sizes differ, file is still being written
+            if size1 != size2:
+                time.sleep(0.5)
+                return self._ensure_file_synced(file_path)  # Recurse until stable
+            
+            # On Unix-like systems, sync the file to disk
+            if hasattr(os, 'fsync'):
+                try:
+                    with open(file_path, 'rb') as f:
+                        os.fsync(f.fileno())
+                except:
+                    pass
+        except:
+            pass
 
 
 NODE_CLASS_MAPPINGS = {
