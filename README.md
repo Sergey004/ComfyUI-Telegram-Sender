@@ -37,7 +37,7 @@ cd ComfyUI/custom_nodes
 
 2. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/ComfyUI-Telegram-Sender
+git clone https://github.com/Sergey004/ComfyUI-Telegram-Sender
 ```
 
 3. Install dependencies:
