@@ -442,7 +442,7 @@ Use the `bot_token_override` parameter in TelegramSender node - it will override
 | Automatic hook on save | Explicit node in workflow |
 | Settings in UI | Separate TelegramConfig node |
 | Token in UI settings | Token in protected config file |
-| LoRA mapping | Use different nodes for different channels |
+| LoRA mapping | Same |
 | Unified global settings | Each node is independent |
 
 ## 🔒 Security
