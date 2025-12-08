@@ -60,7 +60,7 @@ def save_config(config):
             json.dump(config, f, indent=2)
         return True
     except Exception as e:
-        print(f"[TelegramSender] ⚠️ Could not save config: {e}")
+        print(f"[Telegram Sender] ⚠️ Could not save config: {e}")
         return False
 
 class TelegramConfig:
@@ -256,7 +256,7 @@ class TelegramSender:
                         prompt=None, extra_pnginfo=None):
         
         # Log input parameters for debugging
-        print(f"[TelegramSender] 🔧 Parameters: retry_count={retry_count}, retry_delay={retry_delay}")
+        print(f"[Telegram Sender] 🔧 Parameters: retry_count={retry_count}, retry_delay={retry_delay}")
         
         # Get bot token from override or config
         config = load_config()
@@ -264,7 +264,7 @@ class TelegramSender:
         
         # Validation
         if not bot_token:
-            print("[TelegramSender] ⚠️ No bot token configured. Use TelegramConfig node to set token.")
+            print("[Telegram Sender] ⚠️ No bot token configured. Use TelegramConfig node to set token.")
             return (images,)
         
         # Use default chat_id from config if not provided
@@ -272,7 +272,7 @@ class TelegramSender:
             chat_id = config.get("default_chat_id", "")
             
         if not chat_id and not nsfw_channel_id and not unsorted_channel_id:
-            print("[TelegramSender] ⚠️ No chat ID provided. Skipping send.")
+            print("[Telegram Sender] ⚠️ No chat ID provided. Skipping send.")
             return (images,)
 
         # Extract metadata from workflow
@@ -296,7 +296,7 @@ class TelegramSender:
                     try:
                         pnginfo_dict = TelegramMetadata.get_metadata(prompt)
                     except Exception as e:
-                        print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
+                        print(f"[Telegram Sender] ⚠️ Enhanced metadata extraction failed: {e}")
                 
                 # Format filename prefix
                 formatted_filename = self._format_filename(filename_prefix.strip(), pnginfo_dict)
@@ -328,10 +328,10 @@ class TelegramSender:
                         for key, value in pnginfo_dict.items():
                             if value and isinstance(value, (str, int, float)):
                                 pnginfo.add_text(key, str(value))
-                        print(f"[TelegramSender] ✅ Enhanced metadata embedded in PNG")
+                        print(f"[Telegram Sender] ✅ Enhanced metadata embedded in PNG")
                     
                     except Exception as e:
-                        print(f"[TelegramSender] ⚠️ Enhanced metadata embedding failed: {e}")
+                        print(f"[Telegram Sender] ⚠️ Enhanced metadata embedding failed: {e}")
                 elif metadata_text:
                     # Fallback to user-provided metadata if no enhanced metadata
                     pnginfo.add_text("parameters", metadata_text)
@@ -355,7 +355,7 @@ class TelegramSender:
                 )
                 
                 if not target_chat_id:
-                    print("[TelegramSender] ⚠️ No valid chat_id determined. Skipping image.")
+                    print("[Telegram Sender] ⚠️ No valid chat_id determined. Skipping image.")
                     self._cleanup_file(temp_path)
                     continue
                 
@@ -367,7 +367,7 @@ class TelegramSender:
                     if os.path.getsize(photo_path) > 10 * 1024 * 1024:
                         photo_path = self._compress_image(photo_path)
                 except Exception as e:
-                    print(f"[TelegramSender] Compression check failed: {e}")
+                    print(f"[Telegram Sender] Compression check failed: {e}")
                 
                 # Ensure file is fully written to disk
                 self._ensure_file_synced(photo_path)
@@ -395,12 +395,12 @@ class TelegramSender:
                               True, temp_path, retry_count, retry_delay),
                         daemon=True
                     ).start()
-                    print(f"[TelegramSender] 📄 Sending as document in addition to photo (original PNG, no resize)")
+                    print(f"[Telegram Sender] 📄 Sending as document in addition to photo (original PNG, no resize)")
                 else:
-                    print(f"[TelegramSender] 📷 Sending as photo only")
+                    print(f"[Telegram Sender] 📷 Sending as photo only")
                 
             except Exception as e:
-                print(f"[TelegramSender] ❌ Error processing image {i}: {e}")
+                print(f"[Telegram Sender] ❌ Error processing image {i}: {e}")
                 continue
         
         return (images,)
@@ -422,13 +422,13 @@ class TelegramSender:
                         
                         # If we got valid metadata, use it
                         if metadata_text and metadata_text.strip():
-                            print(f"[TelegramSender] ✅ Using enhanced metadata extraction from workflow")
+                            print(f"[Telegram Sender] ✅ Using enhanced metadata extraction from workflow")
                             return metadata_text
                     except Exception as e:
-                        print(f"[TelegramSender] ⚠️ Enhanced metadata building failed: {e}")
+                        print(f"[Telegram Sender] ⚠️ Enhanced metadata building failed: {e}")
                 
             except Exception as e:
-                print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
+                print(f"[Telegram Sender] ⚠️ Enhanced metadata extraction failed: {e}")
         
         # Fallback to original method if enhanced extraction fails
         # But still use enhanced extraction for metadata if available
@@ -445,7 +445,7 @@ class TelegramSender:
                         positive_prompt = extracted_positive if extracted_positive else positive_prompt
                         negative_prompt = extracted_negative if extracted_negative else negative_prompt
         except Exception as e:
-            print(f"[TelegramSender] ⚠️ Fallback metadata extraction failed: {e}")
+            print(f"[Telegram Sender] ⚠️ Fallback metadata extraction failed: {e}")
         
         # Build fallback metadata
         parts = []
@@ -465,7 +465,7 @@ class TelegramSender:
                 if params:
                     parts.append(params)
             except Exception as e:
-                print(f"[TelegramSender] ⚠️ Parameter extraction failed: {e}")
+                print(f"[Telegram Sender] ⚠️ Parameter extraction failed: {e}")
         
         return "\n".join(parts)
 
@@ -526,7 +526,7 @@ class TelegramSender:
                         params.append(f"Lora: {lora_name}: {strength}")
         
         except Exception as e:
-            print(f"[TelegramSender] Error extracting parameters: {e}")
+            print(f"[Telegram Sender] Error extracting parameters: {e}")
         
         # Ensure all params are strings before joining
         if params:
@@ -555,10 +555,10 @@ class TelegramSender:
                             loras.append(lora_name.lower().strip())
                     
                     if loras:
-                        print(f"[TelegramSender] ✅ Extracted {len(loras)} LoRAs from metadata")
+                        print(f"[Telegram Sender] ✅ Extracted {len(loras)} LoRAs from metadata")
                         return loras
             except Exception as e:
-                print(f"[TelegramSender] ⚠️ Enhanced metadata extraction failed: {e}")
+                print(f"[Telegram Sender] ⚠️ Enhanced metadata extraction failed: {e}")
         
         # Fallback: direct inspection for basic ComfyUI LoRA nodes
         try:
@@ -575,7 +575,7 @@ class TelegramSender:
                             loras.append(clean_name)
         
         except Exception as e:
-            print(f"[TelegramSender] ⚠️ LoRA fallback extraction failed: {e}")
+            print(f"[Telegram Sender] ⚠️ LoRA fallback extraction failed: {e}")
         
         return loras
 
@@ -605,9 +605,9 @@ class TelegramSender:
                 
                 if lora_key and chat_id:
                     mapping[lora_key] = chat_id
-                    print(f"[TelegramSender] 📋 Loaded LoRA mapping: '{lora_key}' → {chat_id}")
+                    print(f"[Telegram Sender] 📋 Loaded LoRA mapping: '{lora_key}' → {chat_id}")
             except Exception as e:
-                print(f"[TelegramSender] ⚠️ Error parsing LoRA mapping line '{line}': {e}")
+                print(f"[Telegram Sender] ⚠️ Error parsing LoRA mapping line '{line}': {e}")
                 continue
         
         return mapping
@@ -618,7 +618,7 @@ class TelegramSender:
         """Determine which chat to send to based on content"""
         target_chat_id = None
         
-        print(f"[TelegramSender] 🔀 Routing logic:")
+        print(f"[Telegram Sender] 🔀 Routing logic:")
         print(f"  - Default chat_id: {default_chat_id}")
         print(f"  - Enable LoRA routing: {enable_lora_routing}")
         print(f"  - LoRAs in workflow: {loras_in_workflow}")
@@ -629,14 +629,14 @@ class TelegramSender:
             lora_mapping = self._parse_lora_mapping()
             
             if lora_mapping:
-                print(f"[TelegramSender] 📚 Available LoRA mappings: {lora_mapping}")
+                print(f"[Telegram Sender] 📚 Available LoRA mappings: {lora_mapping}")
                 
                 # Check each LoRA in workflow against mapping
                 for lora_in_workflow in loras_in_workflow:
                     for lora_key, mapped_chat_id in lora_mapping.items():
                         # Match if mapping key is substring of actual LoRA name
                         if lora_key in lora_in_workflow:
-                            print(f"[TelegramSender] ✅ LoRA routing: '{lora_in_workflow}' matched key '{lora_key}' → {mapped_chat_id}")
+                            print(f"[Telegram Sender] ✅ LoRA routing: '{lora_in_workflow}' matched key '{lora_key}' → {mapped_chat_id}")
                             target_chat_id = mapped_chat_id
                             break
                     
@@ -644,9 +644,9 @@ class TelegramSender:
                         break
                 
                 if not target_chat_id:
-                    print(f"[TelegramSender] ⚠️ No LoRA mapping found for: {loras_in_workflow}")
+                    print(f"[Telegram Sender] ⚠️ No LoRA mapping found for: {loras_in_workflow}")
             else:
-                print(f"[TelegramSender] ⚠️ LoRA routing enabled but no mappings configured")
+                print(f"[Telegram Sender] ⚠️ LoRA routing enabled but no mappings configured")
         
         # Priority 2: NSFW detection (overrides LoRA routing if NSFW found)
         if enable_nsfw and nsfw_channel_id:
@@ -655,23 +655,23 @@ class TelegramSender:
             
             # If NSFW in positive but not in negative, redirect
             if "nsfw" in positive_lower and "nsfw" not in negative_lower:
-                print(f"[TelegramSender] 🔞 NSFW detected in positive prompt, redirecting to {nsfw_channel_id}")
+                print(f"[Telegram Sender] 🔞 NSFW detected in positive prompt, redirecting to {nsfw_channel_id}")
                 target_chat_id = nsfw_channel_id
         
         # Priority 3: Use default chat_id if no routing matched
         if not target_chat_id and default_chat_id:
-            print(f"[TelegramSender] 📌 Using default chat_id: {default_chat_id}")
+            print(f"[Telegram Sender] 📌 Using default chat_id: {default_chat_id}")
             target_chat_id = default_chat_id
         
         # Priority 4: Fallback to unsorted channel if no other chat_id
         if not target_chat_id and unsorted_channel_id:
-            print(f"[TelegramSender] 📦 Using unsorted channel: {unsorted_channel_id}")
+            print(f"[Telegram Sender] 📦 Using unsorted channel: {unsorted_channel_id}")
             target_chat_id = unsorted_channel_id
         
         if target_chat_id:
-            print(f"[TelegramSender] ✅ Final destination: {target_chat_id}")
+            print(f"[Telegram Sender] ✅ Final destination: {target_chat_id}")
         else:
-            print(f"[TelegramSender] ❌ No target chat_id determined!")
+            print(f"[Telegram Sender] ❌ No target chat_id determined!")
         
         return target_chat_id
 
@@ -695,7 +695,7 @@ class TelegramSender:
                 ratio = max_val / max(width, height)
                 new_size = (int(width * ratio), int(height * ratio))
                 
-                print(f"[TelegramSender] 🔄 Resizing from {width}x{height} to {new_size}")
+                print(f"[Telegram Sender] 🔄 Resizing from {width}x{height} to {new_size}")
                 
                 img = img.resize(new_size, Image.LANCZOS)
                 temp_path = os.path.splitext(image_path)[0] + "_resized.jpg"
@@ -703,7 +703,7 @@ class TelegramSender:
                 
                 return temp_path
         except Exception as e:
-            print(f"[TelegramSender] ⚠️ Resize error: {e}")
+            print(f"[Telegram Sender] ⚠️ Resize error: {e}")
             return image_path
 
     def _compress_image(self, image_path, target_size=10 * 1024 * 1024):
@@ -718,15 +718,15 @@ class TelegramSender:
                     file_size = os.path.getsize(temp_path)
                     
                     if file_size <= target_size:
-                        print(f"[TelegramSender] 🗜️ Compressed to {file_size // 1024}KB (quality: {quality})")
+                        print(f"[Telegram Sender] 🗜️ Compressed to {file_size // 1024}KB (quality: {quality})")
                         return temp_path
                     
                     quality -= 10
                 
-                print(f"[TelegramSender] ⚠️ Could not compress below target size")
+                print(f"[Telegram Sender] ⚠️ Could not compress below target size")
                 return temp_path
         except Exception as e:
-            print(f"[TelegramSender] ⚠️ Compress error: {e}")
+            print(f"[Telegram Sender] ⚠️ Compress error: {e}")
             return image_path
 
     def _send_telegram_request(self, image_path, chat_id, bot_token, 
@@ -751,7 +751,7 @@ class TelegramSender:
             wait_time += 0.1
         
         if not os.path.exists(image_path):
-            print(f"[TelegramSender] ❌ File not found after {max_wait}s: {image_path}")
+            print(f"[Telegram Sender] ❌ File not found after {max_wait}s: {image_path}")
             return
         
         # Get file size for dynamic timeout calculation
@@ -760,7 +760,7 @@ class TelegramSender:
             # Estimate timeout: 1 second per MB + 30 seconds base (for slow connections)
             # Minimum 60 seconds, maximum 300 seconds
             estimated_timeout = max(60, min(300, 30 + int(file_size_mb * 1.5)))
-            print(f"[TelegramSender] 📁 File ready: {file_size_mb:.2f}MB (timeout: {estimated_timeout}s)")
+            print(f"[Telegram Sender] 📁 File ready: {file_size_mb:.2f}MB (timeout: {estimated_timeout}s)")
         except:
             estimated_timeout = 60
         
@@ -781,7 +781,7 @@ class TelegramSender:
                 if response.ok:
                     file_size = os.path.getsize(image_path) / (1024 * 1024)  # MB
                     file_type = "document" if as_document else "photo"
-                    print(f"[TelegramSender] ✅ Sent to {chat_id} as {file_type} ({file_size:.2f}MB)")
+                    print(f"[Telegram Sender] ✅ Sent to {chat_id} as {file_type} ({file_size:.2f}MB)")
                     
                     # Clean up only temporary files, not the original if sent as document
                     if as_document and image_path == original_path:
@@ -795,40 +795,40 @@ class TelegramSender:
                         error_msg = response.json().get('description', response.text)
                     except:
                         error_msg = response.text
-                    print(f"[TelegramSender] ❌ [{attempt+1}/{retry_count}] Error: {error_msg}")
+                    print(f"[Telegram Sender] ❌ [{attempt+1}/{retry_count}] Error: {error_msg}")
                     
             except requests.exceptions.ConnectTimeout:
-                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Connection timeout (establishing connection failed)")
+                print(f"[Telegram Sender] ⏱️ [{attempt+1}/{retry_count}] Connection timeout (establishing connection failed)")
                 
             except requests.exceptions.ReadTimeout:
-                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Read timeout (server not responding)")
+                print(f"[Telegram Sender] ⏱️ [{attempt+1}/{retry_count}] Read timeout (server not responding)")
                 
             except requests.exceptions.Timeout:
-                print(f"[TelegramSender] ⏱️ [{attempt+1}/{retry_count}] Request timeout")
+                print(f"[Telegram Sender] ⏱️ [{attempt+1}/{retry_count}] Request timeout")
                 
             except (socket.timeout, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # Socket-level errors
-                print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Socket error - connection interrupted, retrying...")
+                print(f"[Telegram Sender] 🔌 [{attempt+1}/{retry_count}] Socket error - connection interrupted, retrying...")
                 
             except (requests.exceptions.ConnectionError, OSError, ProtocolError) as e:
                 # Catch "Connection aborted" and other socket errors
                 error_str = str(e)
                 if "Connection aborted" in error_str or "The write operation timed out" in error_str:
-                    print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Connection aborted/write timeout - retrying...")
+                    print(f"[Telegram Sender] 🔌 [{attempt+1}/{retry_count}] Connection aborted/write timeout - retrying...")
                 elif "Connection reset" in error_str:
-                    print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Connection reset - retrying...")
+                    print(f"[Telegram Sender] 🔌 [{attempt+1}/{retry_count}] Connection reset - retrying...")
                 else:
-                    print(f"[TelegramSender] 🔌 [{attempt+1}/{retry_count}] Connection error: {e}")
+                    print(f"[Telegram Sender] 🔌 [{attempt+1}/{retry_count}] Connection error: {e}")
                 
             except Exception as e:
-                print(f"[TelegramSender] ❌ [{attempt+1}/{retry_count}] Exception: {e}")
+                print(f"[Telegram Sender] ❌ [{attempt+1}/{retry_count}] Exception: {e}")
             
             if attempt < retry_count - 1:
                 wait_time = retry_delay + (attempt * 5)  # Linear backoff: delay + (attempt * 5)
-                print(f"[TelegramSender] ⏳ Waiting {wait_time}s before retry...")
+                print(f"[Telegram Sender] ⏳ Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
         
-        print(f"[TelegramSender] ❌ Failed to send after {retry_count} attempts")
+        print(f"[Telegram Sender] ❌ Failed to send after {retry_count} attempts")
         if as_document and image_path == original_path:
             pass  # Don't delete original
         else:
@@ -909,7 +909,7 @@ class TelegramSender:
             try:
                 os.remove(path)
             except Exception as e:
-                print(f"[TelegramSender] ⚠️ Could not delete {path}: {e}")
+                print(f"[Telegram Sender] ⚠️ Could not delete {path}: {e}")
 
     def _ensure_file_synced(self, file_path):
         """Ensure file is fully written to disk by checking file stability"""
