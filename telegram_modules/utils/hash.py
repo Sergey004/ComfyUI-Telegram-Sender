@@ -13,6 +13,7 @@ CACHE_SIZE_LIMIT = 100
 
 
 cache_model_hash = OrderedDict()
+cache_model_hash_full = OrderedDict()
 _disk_cache = {}
 _disk_cache_dirty = False
 _cache_lock = threading.Lock()
@@ -106,4 +107,42 @@ def calc_hash(filename, use_only_filename=True):
         return model_hash
     except Exception as e:
         print_error(f"Failed to calculate hash for {filename}: {e}")
+        return ""
+
+def calc_sha256_full(filename, use_only_filename=True):
+    global _disk_cache_dirty
+    if not filename or not os.path.isfile(filename):
+        return ""
+    key = os.path.basename(filename) if use_only_filename else filename
+    current_mod_time = get_file_mod_time(filename)
+    with _cache_lock:
+        if key in cache_model_hash_full:
+            return cache_model_hash_full[key]
+        record = _disk_cache.get(key)
+        if record and record.get("file_modification_date") == current_mod_time and "sha256_full" in record:
+            cache_model_hash_full[key] = record["sha256_full"]
+            cache_model_hash_full.move_to_end(key)
+            return record["sha256_full"]
+    try:
+        sha256_hash = hashlib.sha256()
+        with open(filename, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                sha256_hash.update(byte_block)
+        full_hash = sha256_hash.hexdigest()
+        with _cache_lock:
+            if len(cache_model_hash_full) >= CACHE_SIZE_LIMIT:
+                cache_model_hash_full.popitem(last=False)
+            cache_model_hash_full[key] = full_hash
+            if key not in _disk_cache or _disk_cache[key].get("file_modification_date") != current_mod_time or "sha256_full" not in _disk_cache[key]:
+                rec = _disk_cache.get(key) or {}
+                rec["file_hash"] = rec.get("file_hash") or full_hash[:10]
+                rec["sha256_full"] = full_hash
+                rec["file_modification_date"] = current_mod_time
+                _disk_cache[key] = rec
+                _disk_cache_dirty = True
+            if _disk_cache_dirty:
+                save_disk_cache()
+        return full_hash
+    except Exception as e:
+        print_error(f"Failed to calculate full sha256 for {filename}: {e}")
         return ""
