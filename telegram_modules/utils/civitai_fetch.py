@@ -33,7 +33,7 @@ TYPES = {
 PREVIEW_EXTS = [".jpg", ".png", ".jpeg", ".gif"]
 PREVIEW_EXTS = PREVIEW_EXTS + [".preview" + x for x in PREVIEW_EXTS]
 
-USER_AGENT = "ComfyUI-Telegram-Sender"
+USER_AGENT = "CivitaiLink:Automatic1111"
 BASE_URL = os.getenv("CIVITAI_ENDPOINT", "https://civitai.com/api/v1")
 
 def has_preview(path):
