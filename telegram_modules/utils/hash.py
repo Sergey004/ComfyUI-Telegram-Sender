@@ -9,7 +9,7 @@ from ..config import NODE_CACHE_DIR
 from .log import print_warning, print_error
 
 CACHE_FILE = os.path.join(NODE_CACHE_DIR, "model_hash_cache.json")
-CACHE_SIZE_LIMIT = 100
+CACHE_SIZE_LIMIT = 1000
 
 
 cache_model_hash = OrderedDict()
@@ -125,9 +125,14 @@ def calc_sha256_full(filename, use_only_filename=True):
             return record["sha256_full"]
     try:
         sha256_hash = hashlib.sha256()
+        # Use larger chunks to reduce syscall overhead
+        chunk_size = 1024 * 1024
         with open(filename, "rb") as f:
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
+            while True:
+                data = f.read(chunk_size)
+                if not data:
+                    break
+                sha256_hash.update(data)
         full_hash = sha256_hash.hexdigest()
         with _cache_lock:
             if len(cache_model_hash_full) >= CACHE_SIZE_LIMIT:
