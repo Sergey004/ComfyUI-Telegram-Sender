@@ -71,6 +71,7 @@ def calc_hash(filename, use_only_filename=True):
 
         # Check disk cache if not found in memory
         record = _disk_cache.get(key)
+        # Respect mtime: use cached hash only if ondisk mtime matches
         if record and record.get("file_modification_date") == current_mod_time:
             # Update in-memory cache from disk cache
             cache_model_hash[key] = record["file_hash"]
@@ -92,7 +93,7 @@ def calc_hash(filename, use_only_filename=True):
                 cache_model_hash.popitem(last=False)  # Remove oldest item
             cache_model_hash[key] = model_hash
 
-            # Update disk cache only if necessary
+            # Persist/update when mtime differs or entry missing
             if key not in _disk_cache or _disk_cache[key].get("file_modification_date") != current_mod_time:
                 _disk_cache[key] = {
                     "file_hash": model_hash,
@@ -119,6 +120,7 @@ def calc_sha256_full(filename, use_only_filename=True):
         if key in cache_model_hash_full:
             return cache_model_hash_full[key]
         record = _disk_cache.get(key)
+        # Respect mtime: use cached full hash when mtime matches
         if record and record.get("file_modification_date") == current_mod_time and "sha256_full" in record:
             cache_model_hash_full[key] = record["sha256_full"]
             cache_model_hash_full.move_to_end(key)

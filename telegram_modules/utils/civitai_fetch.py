@@ -71,29 +71,14 @@ def build_hash_index(paths):
     mapping = {}
     if not paths:
         return mapping
-    try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        max_workers = max(2, min(32, (os.cpu_count() or 4) * 2))
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(calc_sha256_full, path): path for path in paths}
-            for fut in tqdm(as_completed(futures), total=len(futures), desc="Hash files", unit="file"):
-                path = futures[fut]
-                try:
-                    full_hash = fut.result()
-                except Exception:
-                    full_hash = ""
-                if not full_hash:
-                    continue
-                mapping[full_hash.lower()] = {"path": path}
-    except Exception:
-        for path in tqdm(paths, desc="Hash files", unit="file"):
-            try:
-                full_hash = calc_sha256_full(path)
-            except Exception:
-                full_hash = ""
-            if not full_hash:
-                continue
-            mapping[full_hash.lower()] = {"path": path}
+    for path in tqdm(paths, desc="Hash files", unit="file"):
+        try:
+            full_hash = calc_sha256_full(path)
+        except Exception:
+            full_hash = ""
+        if not full_hash:
+            continue
+        mapping[full_hash.lower()] = {"path": path}
     print_info(f"  Hash index entries: {len(mapping)}")
     return mapping
 
@@ -120,7 +105,20 @@ def _req(endpoint, method="GET", data=None, params=None, headers=None):
     return resp.json()
 
 def _get_all_by_hash(hashes):
-    return _req("/model-versions/by-hash", method="POST", data=hashes)
+    # Ensure payload is an array of SHA256 hashes (strings)
+    if not isinstance(hashes, (list, tuple)):
+        hashes = [hashes]
+    cleaned = []
+    for h in hashes:
+        if not h:
+            continue
+        try:
+            cleaned.append(str(h).strip().lower())
+        except Exception:
+            continue
+    if not cleaned:
+        return []
+    return _req("/model-versions/by-hash", method="POST", data=cleaned)
 
 def _fetch_by_name(paths, nsfw=True):
     updated_prev = 0
@@ -318,8 +316,7 @@ def fetch_missing(nsfw=True, narrow_types=None, batch=100, api_key_env="CIVITAI_
 
     # Fallback: name-based lookup for files we couldn't hash or where API lacks SHA256
     hashed_paths = {v["path"] for v in index.values()}
-    # name_candidates is the original 'candidates' set
-    fallback_paths = [p for p in candidates if p not in hashed_paths and (not has_preview(p) or not has_info(p))]
+    fallback_paths = [p for p in all_paths if p not in hashed_paths and (not has_preview(p) or not has_info(p))]
     if fallback_paths:
         print_info(f"  Fallback name-based matching for {len(fallback_paths)} files")
         prev2, info2 = _fetch_by_name(fallback_paths, nsfw=nsfw)
