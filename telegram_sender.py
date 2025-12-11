@@ -41,6 +41,7 @@ except (ImportError, ModuleNotFoundError):
 # Config file path
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "telegram_config.json")
+NSFW_TRIGGERS_FILE = os.path.join(CONFIG_DIR, "nsfw_triggers.json")
 
 def load_config():
     """Load configuration from file"""
@@ -62,6 +63,50 @@ def save_config(config):
     except Exception as e:
         print(f"[Telegram Sender] ⚠️ Could not save config: {e}")
         return False
+
+_nsfw_triggers_cache = None
+_nsfw_triggers_mtime = None
+
+def load_nsfw_triggers():
+    global _nsfw_triggers_cache, _nsfw_triggers_mtime
+    try:
+        if not os.path.exists(NSFW_TRIGGERS_FILE):
+            _nsfw_triggers_cache = None
+            _nsfw_triggers_mtime = None
+            return None
+        mtime = os.path.getmtime(NSFW_TRIGGERS_FILE)
+        if _nsfw_triggers_cache is not None and _nsfw_triggers_mtime == mtime:
+            return _nsfw_triggers_cache
+        with open(NSFW_TRIGGERS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        keywords = []
+        regex = []
+        negative_keywords = []
+        negative_regex = []
+        if isinstance(data, list):
+            keywords = [str(x).lower() for x in data]
+        elif isinstance(data, dict):
+            kw = data.get('nsfw_triggers') or data.get('keywords') or data.get('include') or []
+            rx = data.get('regex') or []
+            nkw = data.get('negative_keywords') or data.get('exclude') or []
+            nrx = data.get('negative_regex') or []
+            keywords = [str(x).lower() for x in kw]
+            regex = [str(x) for x in rx]
+            negative_keywords = [str(x).lower() for x in nkw]
+            negative_regex = [str(x) for x in nrx]
+        result = {
+            'keywords': keywords,
+            'regex': regex,
+            'negative_keywords': negative_keywords,
+            'negative_regex': negative_regex,
+        }
+        _nsfw_triggers_cache = result
+        _nsfw_triggers_mtime = mtime
+        print(f"[Telegram Sender] 📚 NSFW triggers loaded: {len(keywords)} keywords, {len(regex)} regex, {len(negative_keywords)} negative_keywords, {len(negative_regex)} negative_regex")
+        return result
+    except Exception as e:
+        print(f"[Telegram Sender] ⚠️ Could not load NSFW triggers: {e}")
+        return None
 
 class TelegramConfig:
     """
@@ -652,11 +697,54 @@ class TelegramSender:
         if enable_nsfw and nsfw_channel_id:
             positive_lower = positive_prompt.lower() if positive_prompt else ""
             negative_lower = negative_prompt.lower() if negative_prompt else ""
-            
-            # If NSFW in positive but not in negative, redirect
-            if "nsfw" in positive_lower and "nsfw" not in negative_lower:
-                print(f"[Telegram Sender] 🔞 NSFW detected in positive prompt, redirecting to {nsfw_channel_id}")
-                target_chat_id = nsfw_channel_id
+            triggers = load_nsfw_triggers()
+            nsfw_found = False
+            neg_block = False
+            if triggers:
+                for kw in triggers.get('keywords', []):
+                    if not kw:
+                        continue
+                    kw1 = kw
+                    kw2 = kw.replace('_', ' ')
+                    kw3 = kw.replace(' ', '_')
+                    if (kw1 in positive_lower) or (kw2 in positive_lower) or (kw3 in positive_lower):
+                        nsfw_found = True
+                        break
+                if not nsfw_found:
+                    for pattern in triggers.get('regex', []):
+                        try:
+                            if re.search(pattern, positive_prompt or "", re.IGNORECASE):
+                                nsfw_found = True
+                                break
+                        except Exception:
+                            pass
+                for kw in triggers.get('negative_keywords', []):
+                    if not kw:
+                        continue
+                    kw1 = kw
+                    kw2 = kw.replace('_', ' ')
+                    kw3 = kw.replace(' ', '_')
+                    if (kw1 in negative_lower) or (kw2 in negative_lower) or (kw3 in negative_lower):
+                        neg_block = True
+                        break
+                if not neg_block:
+                    for pattern in triggers.get('negative_regex', []):
+                        try:
+                            if re.search(pattern, negative_prompt or "", re.IGNORECASE):
+                                neg_block = True
+                                break
+                        except Exception:
+                            pass
+                if not nsfw_found and not triggers.get('keywords') and not triggers.get('regex'):
+                    if "nsfw" in positive_lower:
+                        nsfw_found = True
+                if nsfw_found and not neg_block:
+                    print(f"[Telegram Sender] 🔞 NSFW detected by triggers, redirecting to {nsfw_channel_id}")
+                    target_chat_id = nsfw_channel_id
+            else:
+                if "nsfw" in positive_lower and "nsfw" not in negative_lower:
+                    print(f"[Telegram Sender] 🔞 NSFW detected in positive prompt, redirecting to {nsfw_channel_id}")
+                    target_chat_id = nsfw_channel_id
         
         # Priority 3: Use default chat_id if no routing matched
         if not target_chat_id and default_chat_id:
