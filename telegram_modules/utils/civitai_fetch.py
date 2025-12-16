@@ -1,5 +1,7 @@
 import os
 import json
+import re
+import html
 import glob
 import tempfile
 import shutil
@@ -35,6 +37,7 @@ PREVIEW_EXTS = PREVIEW_EXTS + [".preview" + x for x in PREVIEW_EXTS]
 
 USER_AGENT = "CivitaiLink:Automatic1111"
 BASE_URL = os.getenv("CIVITAI_ENDPOINT", "https://civitai.com/api/v1")
+OVERWRITE_INFO = os.getenv("CIVITAI_OVERWRITE_INFO", "false").lower() in ("1", "true", "yes")
 
 def has_preview(path):
     stem = os.path.splitext(path)[0]
@@ -43,6 +46,27 @@ def has_preview(path):
 def has_info(path):
     return os.path.isfile(os.path.splitext(path)[0] + ".json")
 
+def _read_info_json(path):
+    try:
+        p = Path(path).with_suffix(".json")
+        if not p.exists():
+            return None
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+def needs_info_update(path):
+    p = Path(path).with_suffix(".json")
+    if not p.exists():
+        return True
+    if OVERWRITE_INFO:
+        data = _read_info_json(path)
+        if data is None:
+            return True
+        desc = data.get("description")
+        if not isinstance(desc, str) or desc.strip() == "":
+            return True
+    return False
 def _basename_key(path):
     return os.path.splitext(os.path.basename(path))[0].strip().lower()
 
@@ -54,7 +78,7 @@ def iter_files_for_type(folder_type, exts):
                     yield p
 
 def collect_paths(narrow_types=None):
-    print_info("[Telegram Sender] Scanning ComfyUI model folders for resources...")
+    print_info(" Scanning ComfyUI model folders for resources...")
     all_paths = set()
     for civ_type, (folder_type, exts) in TYPES.items():
         if narrow_types and civ_type not in narrow_types:
@@ -238,22 +262,94 @@ def save_preview_for(path, image_url):
 
 def save_info_for(path, civ_obj, preferred_weight=0.8):
     print_info(f"  Writing info JSON for: {path}")
-    base = civ_obj.get("baseModel", "") or ""
-    if "SDXL" in base:
+    obj = civ_obj if isinstance(civ_obj, dict) else {}
+    model_versions = obj.get("modelVersions") if isinstance(obj.get("modelVersions"), list) else None
+    model_version = obj if obj.get("files") else (model_versions[0] if (model_versions and len(model_versions) > 0) else None)
+    model_obj = obj.get("model") if isinstance(obj.get("model"), dict) else None
+    base_model = ""
+    if isinstance(model_version, dict):
+        bm = model_version.get("baseModel")
+        base_model = bm if isinstance(bm, str) else ("" if bm is None else str(bm))
+    if not base_model:
+        bm = obj.get("baseModel")
+        base_model = bm if isinstance(bm, str) else ("" if bm is None else str(bm))
+    if not base_model and isinstance(model_obj, dict):
+        bm = model_obj.get("baseModel")
+        base_model = bm if isinstance(bm, str) else ("" if bm is None else str(bm))
+    if "SDXL" in base_model:
         sdv = "SDXL"
-    elif "SD 2" in base:
+    elif "SD 2" in base_model:
         sdv = "SD2"
-    elif "SD 1" in base:
+    elif "SD 1" in base_model:
         sdv = "SD1"
     else:
-        sdv = "unknown"
+        sdv = "Other"
+    desc = ""
+    if isinstance(model_version, dict):
+        dv = model_version.get("description")
+        if isinstance(dv, str) and dv.strip():
+            desc = dv
+    if not desc:
+        dv = obj.get("description")
+        if isinstance(dv, str):
+            dv = html.unescape(re.sub(r"<[^>]+>", "", dv))
+            desc = dv.strip()
+    if not desc and isinstance(model_obj, dict):
+        dv = model_obj.get("description")
+        if isinstance(dv, str):
+            dv = html.unescape(re.sub(r"<[^>]+>", "", dv))
+            desc = dv.strip()
+    if not isinstance(desc, str):
+        try:
+            desc = str(desc)
+        except Exception:
+            desc = ""
+    trained = []
+    if isinstance(model_version, dict):
+        tw = model_version.get("trainedWords")
+        if isinstance(tw, (list, tuple, set, str)) and tw:
+            trained = tw
+    if not trained:
+        tw = obj.get("trainedWords")
+        if isinstance(tw, (list, tuple, set, str)) and tw:
+            trained = tw
+    if not trained and isinstance(model_obj, dict):
+        tw = model_obj.get("trainedWords")
+        if isinstance(tw, (list, tuple, set, str)) and tw:
+            trained = tw
+    if isinstance(trained, str):
+        trained_list = [trained.strip()] if trained.strip() else []
+    elif isinstance(trained, (list, tuple, set)):
+        trained_list = [str(x).strip() for x in trained if x]
+    else:
+        trained_list = []
+    trained_list = [t for t in trained_list if t]
+    try:
+        sha_val = calc_sha256_full(path)
+        sha_val = sha_val.upper() if isinstance(sha_val, str) else ""
+    except Exception:
+        sha_val = ""
+    model_id = None
+    model_version_id = None
+    if isinstance(model_obj, dict):
+        model_id = model_obj.get("id") or model_obj.get("modelId") or model_obj.get("model_id")
+    if isinstance(model_version, dict):
+        model_version_id = model_version.get("id") or model_version.get("modelVersionId") or model_version.get("version_id")
+    if model_id is None:
+        model_id = obj.get("modelId") or obj.get("id")
     data = {
-        "description": civ_obj.get("description", ""),
+        "description": desc,
         "sd version": sdv,
-        "activation text": ", ".join(civ_obj.get("trainedWords", []) or []),
+        "activation text": ", ".join(trained_list),
         "preferred weight": preferred_weight,
         "notes": "",
     }
+    if model_id:
+        data["modelId"] = model_id
+    if model_version_id:
+        data["modelVersionId"] = model_version_id
+    if sha_val:
+        data["sha256"] = sha_val
     Path(path).with_suffix(".json").write_text(json.dumps(data, indent=4))
 
 def fetch_missing(nsfw=True, narrow_types=None, batch=100, api_key_env="CIVITAI_API_KEY"):
@@ -263,7 +359,7 @@ def fetch_missing(nsfw=True, narrow_types=None, batch=100, api_key_env="CIVITAI_
     index = build_hash_index(all_paths)
     # 2) Определить, у каких отсутствуют превью/инфо
     missing_preview_hashes = [h for h, v in index.items() if not has_preview(v["path"])]
-    missing_info_hashes = [h for h, v in index.items() if not has_info(v["path"])]
+    missing_info_hashes = [h for h, v in index.items() if needs_info_update(v["path"])]
     print_info(f"  Missing previews: {len(missing_preview_hashes)}, missing info: {len(missing_info_hashes)}")
 
     def batched_fetch(hashes):
@@ -301,6 +397,7 @@ def fetch_missing(nsfw=True, narrow_types=None, batch=100, api_key_env="CIVITAI_
                 upd_previews += 1
 
     upd_info = 0
+    fallback_for_info = set()
     for r in tqdm(info_results, desc="Infos", unit="item"):
         if not r:
             continue
@@ -309,14 +406,16 @@ def fetch_missing(nsfw=True, narrow_types=None, batch=100, api_key_env="CIVITAI_
             if not h:
                 continue
             key = h.lower()
-            if key in index and not has_info(index[key]["path"]):
+            if key in index and needs_info_update(index[key]["path"]):
                 print_info(f"  Update info for {index[key]['path']}")
                 save_info_for(index[key]["path"], r)
                 upd_info += 1
+                if needs_info_update(index[key]["path"]):
+                    fallback_for_info.add(index[key]["path"])
 
     # Fallback: name-based lookup for files we couldn't hash or where API lacks SHA256
     hashed_paths = {v["path"] for v in index.values()}
-    fallback_paths = [p for p in all_paths if p not in hashed_paths and (not has_preview(p) or not has_info(p))]
+    fallback_paths = [p for p in all_paths if p not in hashed_paths and (not has_preview(p) or needs_info_update(p))]
     if fallback_paths:
         print_info(f"  Fallback name-based matching for {len(fallback_paths)} files")
         prev2, info2 = _fetch_by_name(fallback_paths, nsfw=nsfw)
@@ -325,10 +424,14 @@ def fetch_missing(nsfw=True, narrow_types=None, batch=100, api_key_env="CIVITAI_
 
     # 4) Фолбэк по имени только для оставшихся после запроса по хэшу
     hashed_paths = {v["path"] for v in index.values()}
-    still_missing_paths = [p for p in all_paths if (not has_preview(p) or not has_info(p))]
+    still_missing_paths = [p for p in all_paths if (not has_preview(p) or needs_info_update(p))]
     if still_missing_paths:
         print_info(f"  Fallback name-based matching for {len(still_missing_paths)} files")
         prev2, info2 = _fetch_by_name(still_missing_paths, nsfw=nsfw)
+        upd_previews += prev2
+        upd_info += info2
+    if fallback_for_info:
+        prev2, info2 = _fetch_by_name(list(fallback_for_info), nsfw=nsfw)
         upd_previews += prev2
         upd_info += info2
     result = {"previews_updated": upd_previews, "info_updated": upd_info}
