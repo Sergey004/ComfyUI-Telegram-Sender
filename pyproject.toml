@@ -15,6 +15,9 @@ Repository = "https://github.com/Sergey004/ComfyUI-Telegram-Sender"
 #  Used by Comfy Registry https://registry.comfy.org
 "Bug Tracker" = "https://github.com/Sergey004/ComfyUI-Telegram-Sender/issues"
 
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
 [tool.comfy]
 PublisherId = "Sergey004"
 DisplayName = "ComfyUI-Telegram-Sender"
