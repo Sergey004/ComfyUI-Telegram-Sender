@@ -19,7 +19,7 @@ Repository = "https://github.com/Sergey004/ComfyUI-Telegram-Sender"
 dependencies = {file = ["requirements.txt"]}
 
 [tool.comfy]
-PublisherId = "Sergey004"
+PublisherId = "sergey004"
 DisplayName = "ComfyUI-Telegram-Sender"
 Icon = ""
 includes = [] 
