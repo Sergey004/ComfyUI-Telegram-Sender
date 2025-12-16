@@ -3,7 +3,6 @@ name = "telegram-sender"
 description = "Does the same thing as comfyui_image_metadata_extension but is slightly more modern, sending the output to Telegram and downloading unnecessary metadata at the same time."
 version = "1.0.0"
 license = {file = "LICENSE"} 
-[project]
 classifiers = [
     # For OS-independent nodes (works on all operating systems)
     "Operating System :: OS Independent",
