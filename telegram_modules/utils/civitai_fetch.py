@@ -263,15 +263,29 @@ def save_preview_for(path, image_url):
 def save_info_for(path, civ_obj, preferred_weight=0.8):
     print_info(f"  Writing info JSON for: {path}")
     obj = civ_obj if isinstance(civ_obj, dict) else {}
+    
+    # Определяем структуру входных данных
     model_versions = obj.get("modelVersions") if isinstance(obj.get("modelVersions"), list) else None
-    model_version = obj if obj.get("files") else (model_versions[0] if (model_versions and len(model_versions) > 0) else None)
+    model_version = None
+    full_model = None
+    
+    if obj.get("files"):  # obj это версия
+        model_version = obj
+        full_model = None
+    elif model_versions and len(model_versions) > 0:  # obj это полная модель
+        model_version = model_versions[0]
+        full_model = obj
+    else:
+        full_model = obj
+    
     model_obj = obj.get("model") if isinstance(obj.get("model"), dict) else None
+    
     base_model = ""
     if isinstance(model_version, dict):
         bm = model_version.get("baseModel")
         base_model = bm if isinstance(bm, str) else ("" if bm is None else str(bm))
-    if not base_model:
-        bm = obj.get("baseModel")
+    if not base_model and full_model:
+        bm = full_model.get("baseModel")
         base_model = bm if isinstance(bm, str) else ("" if bm is None else str(bm))
     if not base_model and isinstance(model_obj, dict):
         bm = model_obj.get("baseModel")
@@ -279,31 +293,70 @@ def save_info_for(path, civ_obj, preferred_weight=0.8):
     if "SDXL" in base_model:
         sdv = "SDXL"
     elif "SD 2" in base_model:
-        sdv = "SD2"
-    elif "SD 1" in base_model:
-        sdv = "SD1"
+        sdv = "SD 2"
+    elif "SD 1.5" in base_model:
+        sdv = "SD 1.5"
+    elif "Illustrious" in base_model:
+        sdv = "Illustrious"
+    elif "Pony" in base_model:
+        sdv = "Pony"
+    elif "NoobAI" in base_model:
+        sdv = "Noob AI"
     else:
         sdv = "Other"
+    
+    # Описание: приоритизируем версию над моделью
     desc = ""
+    
+    # 1. Описание версии (если есть)
     if isinstance(model_version, dict):
         dv = model_version.get("description")
         if isinstance(dv, str) and dv.strip():
             desc = dv
-    if not desc:
-        dv = obj.get("description")
+    
+    # 2. Fallback на описание полной модели
+    if not desc and full_model:
+        dv = full_model.get("description")
         if isinstance(dv, str):
             dv = html.unescape(re.sub(r"<[^>]+>", "", dv))
             desc = dv.strip()
+    
+    # 3. Fallback на model_obj
     if not desc and isinstance(model_obj, dict):
         dv = model_obj.get("description")
         if isinstance(dv, str):
             dv = html.unescape(re.sub(r"<[^>]+>", "", dv))
             desc = dv.strip()
+    
+    # Финальная проверка типа
     if not isinstance(desc, str):
         try:
             desc = str(desc)
         except Exception:
             desc = ""
+    
+    # Notes: приоритизируем версию над моделью
+    notes = ""
+    
+    # 1. Notes версии (если есть)
+    if isinstance(model_version, dict):
+        n = model_version.get("notes")
+        if isinstance(n, str) and n.strip():
+            notes = n
+    
+    # 2. Fallback на notes полной модели
+    if not notes and full_model:
+        n = full_model.get("notes")
+        if isinstance(n, str) and n.strip():
+            notes = n
+    
+    # 3. Финальная проверка типа
+    if not isinstance(notes, str):
+        try:
+            notes = str(notes)
+        except Exception:
+            notes = ""
+    
     trained = []
     if isinstance(model_version, dict):
         tw = model_version.get("trainedWords")
@@ -342,7 +395,7 @@ def save_info_for(path, civ_obj, preferred_weight=0.8):
         "sd version": sdv,
         "activation text": ", ".join(trained_list),
         "preferred weight": preferred_weight,
-        "notes": "",
+        "notes": notes,
     }
     if model_id:
         data["modelId"] = model_id
