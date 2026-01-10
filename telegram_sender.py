@@ -309,16 +309,16 @@ class TelegramSender:
         
         # Validation
         if not bot_token:
-            print("[Telegram Sender] ⚠️ No bot token configured. Use TelegramConfig node to set token.")
-            return (images,)
+            print("[Telegram Sender] ⚠️ No bot token configured. Images will be saved locally.")
+            bot_token = ""
         
         # Use default chat_id from config if not provided
         if not chat_id:
             chat_id = config.get("default_chat_id", "")
             
         if not chat_id and not nsfw_channel_id and not unsorted_channel_id:
-            print("[Telegram Sender] ⚠️ No chat ID provided. Skipping send.")
-            return (images,)
+            print("[Telegram Sender] ⚠️ No chat ID provided. Images will be saved locally.")
+            # Continue processing to save files locally; no sending will be attempted.
 
         # Extract metadata from workflow
         metadata_text = self._build_metadata_text(
@@ -417,13 +417,16 @@ class TelegramSender:
                 # Ensure file is fully written to disk
                 self._ensure_file_synced(photo_path)
                 
-                # Send photo in background thread
-                threading.Thread(
-                    target=self._send_telegram_request,
-                    args=(photo_path, target_chat_id, bot_token, 
-                          False, temp_path, retry_count, retry_delay),
-                    daemon=True
-                ).start()
+                # Send photo in background thread if token and target are available
+                if bot_token and target_chat_id:
+                    threading.Thread(
+                        target=self._send_telegram_request,
+                        args=(photo_path, target_chat_id, bot_token, 
+                              False, temp_path, retry_count, retry_delay),
+                        daemon=True
+                    ).start()
+                else:
+                    print(f"[Telegram Sender] 💾 Saved image to {photo_path} (not sent)")
                 
                 # Optionally send as document (original PNG)
                 # Wait a bit before sending document to avoid overwhelming the connection
@@ -434,12 +437,15 @@ class TelegramSender:
                     # Small delay to avoid simultaneous uploads
                     time.sleep(2)
                     
-                    threading.Thread(
-                        target=self._send_telegram_request,
-                        args=(temp_path, target_chat_id, bot_token, 
-                              True, temp_path, retry_count, retry_delay),
-                        daemon=True
-                    ).start()
+                    if bot_token and target_chat_id:
+                        threading.Thread(
+                            target=self._send_telegram_request,
+                            args=(temp_path, target_chat_id, bot_token, 
+                                  True, temp_path, retry_count, retry_delay),
+                            daemon=True
+                        ).start()
+                    else:
+                        print(f"[Telegram Sender] 💾 Saved original PNG to {temp_path} (not sent)")
                     print(f"[Telegram Sender] 📄 Sending as document in addition to photo (original PNG, no resize)")
                 else:
                     print(f"[Telegram Sender] 📷 Sending as photo only")
