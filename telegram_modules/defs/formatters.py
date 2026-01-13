@@ -9,6 +9,8 @@ cache_model_hash = {}
 def calc_hash_for_type(folder_type, model_name):
     try:
         filename = folder_paths.get_full_path(folder_type, model_name)
+        if not filename:
+            return ""
         return calc_hash(filename)
     except Exception as e:
         return ""  # Return empty string if unable to calculate hash
@@ -55,5 +57,11 @@ def extract_embedding_names(text, input_data=None):
 
 def extract_embedding_hashes(text, input_data=None):
     names = extract_embedding_names(text)
-    hashes = [calc_hash(get_embedding_file_path(name)) or "" for name in names]
+    hashes = []
+    for name in names:
+        embedding_path = get_embedding_file_path(name)
+        if embedding_path:
+            hashes.append(calc_hash(embedding_path) or "")
+        else:
+            hashes.append("")
     return hashes
