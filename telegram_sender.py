@@ -7,6 +7,8 @@ import json
 import sys
 import socket
 from queue import Queue, Empty
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 sys.path.append("../../")
 import folder_paths # type: ignore
 from PIL import Image
@@ -20,6 +22,49 @@ from urllib3.exceptions import ProtocolError
 # Limit to 2 simultaneous uploads to avoid overwhelming the connection
 _upload_semaphore = threading.Semaphore(2)
 _upload_lock = threading.Lock()
+
+# Global session with retry strategy for connection pooling
+_session_lock = threading.Lock()
+_global_session = None
+
+def get_global_session():
+    """Get or create a global requests session with retry strategy"""
+    global _global_session
+    
+    if _global_session is None:
+        with _session_lock:
+            if _global_session is None:
+                # Create retry strategy
+                retry_strategy = Retry(
+                    total=3,
+                    backoff_factor=1,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+                    raise_on_status=False
+                )
+                
+                # Create adapter with retry strategy
+                adapter = HTTPAdapter(
+                    max_retries=retry_strategy,
+                    pool_connections=10,
+                    pool_maxsize=20,
+                    pool_block=False
+                )
+                
+                # Create and configure session
+                _global_session = requests.Session()
+                _global_session.mount("http://", adapter)
+                _global_session.mount("https://", adapter)
+                
+                # Configure connection settings
+                _global_session.headers.update({
+                    'Connection': 'keep-alive',
+                    'Keep-Alive': 'timeout=300, max=1000'
+                })
+                
+                print("[Telegram Sender] ✅ Global session created with retry strategy")
+    
+    return _global_session
 
 # Import metadata wrapper based on comfyui_image_metadata_extension
 try:
@@ -849,14 +894,19 @@ class TelegramSender:
             return
         
         # Get file size for dynamic timeout calculation
+        file_size_mb = 0
         try:
             file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
-            # Estimate timeout: 1 second per MB + 30 seconds base (for slow connections)
-            # Minimum 60 seconds, maximum 300 seconds
-            estimated_timeout = max(60, min(300, 30 + int(file_size_mb * 1.5)))
+            # More generous timeout: 2 seconds per MB + 60 seconds base (for slow connections)
+            # Minimum 90 seconds, maximum 600 seconds (10 minutes)
+            estimated_timeout = max(90, min(600, 60 + int(file_size_mb * 2)))
             print(f"[Telegram Sender] 📁 File ready: {file_size_mb:.2f}MB (timeout: {estimated_timeout}s)")
         except:
-            estimated_timeout = 60
+            file_size_mb = 0
+            estimated_timeout = 90
+        
+        # Get global session with connection pooling
+        session = get_global_session()
         
         for attempt in range(retry_count):
             try:
@@ -864,12 +914,13 @@ class TelegramSender:
                     files = {param_name: f}
                     data = {'chat_id': chat_id}
                     
-                    # Use estimated timeout based on file size
-                    response = requests.post(
+                    # Use session with estimated timeout and chunked upload for large files
+                    response = session.post(
                         url, 
                         data=data, 
                         files=files, 
-                        timeout=(10, estimated_timeout)  # (connect_timeout, read_timeout)
+                        timeout=(15, estimated_timeout),  # Increased connect timeout to 15s
+                        stream=True
                     )
                 
                 if response.ok:
