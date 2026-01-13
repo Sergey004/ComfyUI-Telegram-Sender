@@ -23,6 +23,53 @@ from urllib3.exceptions import ProtocolError
 _upload_semaphore = threading.Semaphore(1)
 _upload_lock = threading.Lock()
 
+# Global session with retry strategy for connection pooling
+_session_lock = threading.Lock()
+_global_session = None
+
+def get_global_session():
+    """Get or create a global requests session with retry strategy"""
+    global _global_session
+    
+    if _global_session is None:
+        with _session_lock:
+            if _global_session is None:
+                # Create more aggressive retry strategy
+                retry_strategy = Retry(
+                    total=5,  # Increased from 3 to 5
+                    backoff_factor=2,  # Increased from 1 to 2 (more aggressive backoff)
+                    status_forcelist=[408, 429, 500, 502, 503, 504],  # Added 408 (Request Timeout)
+                    allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+                    raise_on_status=False,
+                    # Retry on connection errors
+                    raise_on_redirect=False,
+                    # Additional retry conditions
+                    respect_retry_after_header=True
+                )
+                
+                # Create adapter with retry strategy
+                adapter = HTTPAdapter(
+                    max_retries=retry_strategy,
+                    pool_connections=10,
+                    pool_maxsize=20,
+                    pool_block=False
+                )
+                
+                # Create and configure session
+                _global_session = requests.Session()
+                _global_session.mount("http://", adapter)
+                _global_session.mount("https://", adapter)
+                
+                # Configure connection settings
+                _global_session.headers.update({
+                    'Connection': 'keep-alive',
+                    'Keep-Alive': 'timeout=300, max=1000'
+                })
+                
+                print("[Telegram Sender] ✅ Global session created with enhanced retry strategy")
+    
+    return _global_session
+
 # Import metadata wrapper based on comfyui_image_metadata_extension
 try:
     from .telegram_metadata import TelegramMetadata
