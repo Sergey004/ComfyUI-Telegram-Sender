@@ -34,6 +34,15 @@ async def save_settings_handler(request):
         print(f"[Telegram API] ❌ Error saving settings: {e}")
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
+async def get_settings_handler(request):
+    """API endpoint to get current settings"""
+    try:
+        config = load_config()
+        return web.json_response({"config": config})
+    except Exception as e:
+        print(f"[Telegram API] ❌ Error getting settings: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
 async def migrate_config_handler(request):
     """API endpoint to migrate settings from old config file"""
     try:
@@ -61,6 +70,7 @@ async def migrate_config_handler(request):
 # Register API routes
 def register_routes(routes):
     """Register Telegram API routes"""
+    routes.append(web.get('/telegram/get_settings', get_settings_handler))
     routes.append(web.post('/telegram/save_settings', save_settings_handler))
     routes.append(web.post('/telegram/migrate_config', migrate_config_handler))
     print("[Telegram API] ✅ API routes registered")
