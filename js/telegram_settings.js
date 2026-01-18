@@ -14,8 +14,8 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Telegram bot token from @BotFather\n\nFormat: 123456789:ABCdefGHIjklMNOpqrsTUVwxyz\n\n💡 How to get:\n1. Open @BotFather in Telegram\n2. Send /newbot command\n3. Follow instructions\n4. Copy the token\n\n⚠️ SECURITY WARNING:\n- Never share your bot token\n- Token gives full control over your bot\n- Keep it secret!\n\n📖 Docs: https://core.telegram.org/bots/api",
         onChange: (value) => {
-            // Save to Python backend
-            saveTelegramSettings();
+            // Debounced save to prevent spamming
+            debouncedSaveTelegramSettings();
         }
     },
     {
@@ -25,7 +25,7 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Default chat/channel ID for sending images\n\nPersonal chat: 123456789\nChannel: -1001234567890\nGroup: -1009876543210\n\n💡 Leave empty to specify in each node\n\n📖 How to get ID:\n1. Send message to bot\n2. Visit: https://api.telegram.org/bot<TOKEN>/getUpdates\n3. Find \"chat\":{\"id\":NUMBER}\n\n⚠️ For channels: bot must be admin",
         onChange: (value) => {
-            saveTelegramSettings();
+            debouncedSaveTelegramSettings();
         }
     },
     {
@@ -35,7 +35,7 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Automatic routing based on LoRA names\n\nFormat: one per line: lora_name:chat_id\n\nExample:\nanime:-1001111111111\nrealistic:-1002222222222\ncharacter:-1003333333333\n\n💡 Partial match:\n- \"anime_style_v2\" matches \"anime\"\n- \"realistic_vision_xl\" matches \"realistic\"\n\n📖 See: Automatic LoRA Routing section in README",
         onChange: (value) => {
-            saveTelegramSettings();
+            debouncedSaveTelegramSettings();
         }
     },
     {
@@ -45,7 +45,7 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Channel ID for NSFW content\n\nFormat: -1001234567890 (for channels)\n\n💡 Used when:\n- enable_nsfw_detection is enabled in node\n- \"nsfw\" keyword found in positive prompt\n\n⚠️ Bot must be admin in this channel",
         onChange: (value) => {
-            saveTelegramSettings();
+            debouncedSaveTelegramSettings();
         }
     },
     {
@@ -55,10 +55,38 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Fallback channel for unrouted images\n\nFormat: -1001234567890 (for channels)\n\n💡 Used when:\n- No explicit chat_id specified\n- No LoRA routing match\n- No NSFW match\n\n📖 Channel determination priority:\n1. Explicit chat_id in node\n2. NSFW detection\n3. LoRA routing\n4. Default chat_id\n5. Unsorted channel",
         onChange: (value) => {
-            saveTelegramSettings();
+            debouncedSaveTelegramSettings();
         }
     },
 ];
+
+// Flag to prevent saving during initial load
+let isLoading = false;
+let saveTimeout = null;
+
+// Load settings from Python backend
+async function loadTelegramSettings() {
+    isLoading = true; // Block saving during load
+    
+    try {
+        const response = await api.fetchApi("/telegram/get_settings");
+        if (response.ok) {
+            const data = await response.json();
+            if (data.config) {
+                app.ui.settings.setSettingValue("Telegram.BotToken", data.config.bot_token || "");
+                app.ui.settings.setSettingValue("Telegram.DefaultChatId", data.config.default_chat_id || "");
+                app.ui.settings.setSettingValue("Telegram.LoraMapping", data.config.lora_mapping || "");
+                app.ui.settings.setSettingValue("Telegram.NSFWChannelId", data.config.nsfw_channel_id || "");
+                app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.config.unsorted_channel_id || "");
+                console.log("[Telegram Sender] ✅ Settings loaded from backend");
+            }
+        }
+    } catch (error) {
+        console.log("[Telegram Sender] ⚠️ Failed to load settings:", error);
+    } finally {
+        isLoading = false; // Unblock saving
+    }
+}
 
 // Migrate settings from old config file if exists
 async function migrateFromOldConfig() {
@@ -86,6 +114,24 @@ async function migrateFromOldConfig() {
     } catch (error) {
         console.log("[Telegram Sender] ⚠️ Migration check skipped:", error);
     }
+}
+
+// Debounced save to prevent spamming
+function debouncedSaveTelegramSettings() {
+    // Don't save during initial load
+    if (isLoading) {
+        return;
+    }
+    
+    // Clear existing timeout
+    if (saveTimeout) {
+        clearTimeout(saveTimeout);
+    }
+    
+    // Set new timeout
+    saveTimeout = setTimeout(() => {
+        saveTelegramSettings();
+    }, 1000); // Save 1 second after last change
 }
 
 // Save settings to Python backend
@@ -131,7 +177,10 @@ app.registerExtension({
     settings: TELEGRAM_SETTINGS,
     
     async setup() {
-        // Migrate settings from old config on startup
+        // First, load current settings from backend
+        await loadTelegramSettings();
+        
+        // Then, migrate from old config file if needed
         await migrateFromOldConfig();
     }
 });
