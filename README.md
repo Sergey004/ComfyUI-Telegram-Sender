@@ -104,6 +104,20 @@ Now:
 
 ### Initial setup (one time)
 
+#### Method 1: Using ComfyUI Settings (Recommended) ⭐
+
+1. Open ComfyUI settings menu (gear icon in bottom left)
+2. Find the **"Telegram Sender"** section
+3. Enter your **bot_token** (received from @BotFather)
+4. Enter **default_chat_id** (optional, can be specified in each node separately)
+5. (Optional) Configure **LoRA to Channel Mapping** - one line per rule: `lora_name:chat_id`
+6. (Optional) Configure **NSFW Channel ID** and **Unsorted Channel ID**
+7. Settings are saved automatically
+
+**Note:** If you have an old `TelegramConfig` node in your workflow, the settings will be automatically migrated to the new format on first startup.
+
+#### Method 2: Using TelegramConfig Node (Legacy)
+
 1. Add the **⚙️ Telegram Config** node to the workflow
 2. Enter your **bot_token** (received from @BotFather)
 3. Enter **default_chat_id** (optional, can be specified in each node separately)
@@ -112,6 +126,8 @@ Now:
 6. After saving, you can remove the `Telegram Config` node from the workflow
 
 **Important:** The token is stored locally in the extension folder and is NOT saved in the workflow file. This means you can safely share workflows with others without revealing your token.
+
+> **⚠️ Note:** The `TelegramConfig` node is deprecated. Please use the ComfyUI Settings menu instead. The node will be removed in a future version.
 
 ![alt text](assets/image1.png)
 

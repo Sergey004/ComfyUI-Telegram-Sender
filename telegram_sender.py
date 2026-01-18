@@ -92,8 +92,24 @@ CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "telegram_config.json")
 NSFW_TRIGGERS_FILE = os.path.join(CONFIG_DIR, "nsfw_triggers.json")
 
+# In-memory config storage (from JavaScript settings)
+_in_memory_config = None
+
+def set_in_memory_config(config):
+    """Set configuration from JavaScript settings"""
+    global _in_memory_config
+    _in_memory_config = config
+    print("[Telegram Sender] ✅ Configuration received from JavaScript settings")
+
 def load_config():
-    """Load configuration from file"""
+    """Load configuration from in-memory settings (JavaScript) or file"""
+    global _in_memory_config
+    
+    # First check if we have settings from JavaScript
+    if _in_memory_config:
+        return _in_memory_config
+    
+    # Fallback to file-based config
     if not os.path.exists(CONFIG_FILE):
         return {"bot_token": "", "default_chat_id": ""}
     try:
@@ -237,90 +253,90 @@ class TelegramSender:
                 "chat_id": ("STRING", {
                     "default": config.get("default_chat_id", ""),
                     "multiline": False,
-                    "tooltip": "Leave empty to use default from config"
+                    "tooltip": "Chat/channel ID to send images to\n\nPersonal chat: 123456789\nChannel: -1001234567890\nGroup: -1009876543210\n\n💡 Leave empty to use default from settings\n\n📖 Priority:\n1. This chat_id (if specified)\n2. NSFW detection\n3. LoRA routing\n4. Default from settings\n5. Unsorted channel"
                 }),
                 "bot_token_override": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "tooltip": "Override token from config (optional)"
+                    "tooltip": "Override token from config (optional)\n\n💡 Use this when:\n- Want to use different bot for specific workflow\n- Testing new bot without changing settings\n\n⚠️ Leave empty to use token from settings"
                 }),
                 "positive_prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
                     "forceInput": True,
-                    "tooltip": "Positive prompt text"
+                    "tooltip": "Positive prompt text\n\n💡 Connect from CLIP Text Encode node\n\n📖 Used for:\n- NSFW detection\n- Metadata in PNG\n- Caption (if enabled in future)"
                 }),
                 "negative_prompt": ("STRING", {
                     "default": "",
                     "multiline": True,
                     "forceInput": True,
-                    "tooltip": "Negative prompt text"
+                    "tooltip": "Negative prompt text\n\n💡 Connect from CLIP Text Encode node\n\n📖 Used for:\n- NSFW detection (blocks if 'nsfw' here)\n- Metadata in PNG"
                 }),
                 "send_as_document": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Send as file in addition to photo (no compression, sends both)"
+                    "tooltip": "Send as document (file) instead of photo\n\nPhoto: Compressed by Telegram, max 10MB\nDocument: Original quality, max 50MB\n\n💡 Use document for:\n- High quality images\n- Large files (>10MB)\n- Original PNG preservation\n\n⚠️ Document takes more space"
                 }),
                 "max_size": ("INT", {
                     "default": 2560, 
                     "min": 512, 
                     "max": 10240,
                     "step": 64,
-                    "tooltip": "Max size for portrait/square images (pixels)"
+                    "tooltip": "Max size for portrait/square images (pixels)\n\n💡 Applied when:\n- Height >= Width\n- Largest side > this value\n\n📖 See also: landscape_max_width for horizontal images"
                 }),
                 "landscape_max_width": ("INT", {
                     "default": 5120, 
                     "min": 512, 
                     "max": 10240,
                     "step": 64,
-                    "tooltip": "Max width for landscape images (pixels)"
+                    "tooltip": "Max width for landscape images (pixels)\n\n💡 Applied when:\n- Width >= Height\n- Width > this value\n\n📖 See also: max_size for vertical/square images"
                 }),
                 "enable_nsfw_detection": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Redirect to NSFW channel if 'nsfw' in prompt"
+                    "tooltip": "Redirect to NSFW channel if 'nsfw' in prompt\n\n💡 How it works:\n1. Checks positive_prompt for 'nsfw'\n2. Checks negative_prompt for 'nsfw' (blocks)\n3. Redirects to nsfw_channel_id if found\n\n📖 Configure nsfw_channel_id in settings"
                 }),
                 "nsfw_channel_id": ("STRING", {
                     "default": config.get("nsfw_channel_id", ""),
                     "multiline": False,
-                    "tooltip": "Channel ID for NSFW content (loads from config if empty)"
+                    "tooltip": "Channel ID for NSFW content (loads from config if empty)\n\nFormat: -1001234567890 (for channels)\n\n💡 Used when:\n- enable_nsfw_detection is enabled\n- 'nsfw' found in positive prompt\n\n⚠️ Bot must be admin in this channel"
                 }),
                 "unsorted_channel_id": ("STRING", {
                     "default": config.get("unsorted_channel_id", ""),
                     "multiline": False,
-                    "tooltip": "Fallback channel if no chat_id specified (loads from config if empty)"
+                    "tooltip": "Fallback channel if no chat_id specified (loads from config if empty)\n\nFormat: -1001234567890 (for channels)\n\n💡 Used when:\n- No explicit chat_id specified\n- No LoRA routing match\n- No NSFW match\n\n📖 Configure in settings"
                 }),
                 "enable_lora_routing": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Enable automatic routing based on LoRA mapping from config"
+                    "tooltip": "Enable automatic routing based on LoRA names\n\n💡 How it works:\n1. Extracts LoRA names from workflow\n2. Matches with mapping from settings\n3. Partial match: 'anime_style' matches 'anime'\n\n📖 Configure mapping in Settings → LoRA to Channel Mapping\n\nExample mapping:\nanime:-1001111111111\nrealistic:-1002222222222"
                 }),
                 "retry_count": ("INT", {
                     "default": 3,
                     "min": 1,
                     "max": 99,
-                    "tooltip": "Number of retry attempts on failure"
+                    "tooltip": "Number of retry attempts on failure\n\n💡 Recommended values:\n- Stable connection: 3\n- Unstable connection: 5-10\n- Very unstable: 15-20\n\n📖 Retries use exponential backoff"
                 }),
                 "retry_delay": ("INT", {
                     "default": 5,
                     "min": 1,
                     "max": 60,
-                    "tooltip": "Delay between retries (seconds)"
+                    "tooltip": "Delay between retries (seconds)\n\n💡 How it works:\n- First retry: delay seconds\n- Second retry: delay + 5 seconds\n- Third retry: delay + 10 seconds\n\n📖 Increase for very slow connections"
                 }),
                 "enable_enhanced_metadata": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Use enhanced metadata extraction from comfyui_image_metadata_extension"
+                    "tooltip": "Use enhanced metadata extraction from comfyui_image_metadata_extension\n\n💡 Extracts automatically:\n- Seed, Steps, CFG\n- Sampler, Scheduler\n- Model, VAE names\n- LoRA names and weights\n\n📖 Metadata saved in A1111 format\nCompatible with Civitai and other tools"
                 }),
                 "filename_prefix": ("STRING", {
                     "default": "telegram_%date%_%model%_%seed%",
                     "multiline": False,
-                    "tooltip": "Filename prefix with placeholders: %date%, %seed%, %model%, %width%, %height%, %pprompt%, %nprompt%"
+                    "tooltip": "Filename prefix with placeholders\n\n💡 Supported placeholders:\n%date% - Date/time (yyyyMMddhhmmss)\n%seed% - Generation seed\n%model% - Model name\n%width% - Image width\n%height% - Image height\n%pprompt% - Positive prompt\n%nprompt% - Negative prompt\n\nExample: telegram_%date%_%model%_%seed%\n\n📖 See README for advanced formatting"
                 }),
                 "subdirectory_name": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "tooltip": "Subdirectory for saving files (e.g., tg_temp). Leave empty for default output directory."
+                    "tooltip": "Subdirectory for saving files\n\nExample: tg_temp, telegram, exports\n\n💡 Leave empty for default output directory\n\n📖 Files saved in: ComfyUI/output/[subdirectory]/"
                 }),
                 "debug_metadata": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable debug output for metadata extraction (shows extraction steps in console)"
+                    "tooltip": "Enable debug output for metadata extraction\n\n💡 Shows in console:\n- Extraction steps\n- Found parameters\n- Warnings and errors\n\n📖 Use when troubleshooting metadata issues"
                 }),
             },
             "hidden": {
