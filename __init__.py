@@ -1,9 +1,13 @@
-print("=" * 50)
-print("[Telegram Sender] __init__.py IS LOADING NOW!")
-print("=" * 50)
-
 from .telegram_sender import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .telegram_api import register_routes
 import execution
+
+WEB_DIRECTORY = "./js"
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
+
+# Register API routes
+WEBHOOKS = []
+register_routes(WEBHOOKS)
 
 try:
     print("[Telegram Sender] Trying to import civitai_fetch...")
@@ -29,5 +33,3 @@ except Exception as e:
     print(f"[Telegram Sender] Exception during init: {e}")
     import traceback
     traceback.print_exc()
-
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
