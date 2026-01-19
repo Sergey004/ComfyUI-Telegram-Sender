@@ -80,7 +80,7 @@ pip install requests pillow
 
 If you want to automatically send images to different channels based on used LoRA:
 
-1. In the **TelegramConfig** node, fill in the **lora_mapping** field
+1. In ComfyUI Settings (⚙ → Telegram Sender), fill in the **LoRA to Channel Mapping** field
 2. Format: one line = one rule `lora_name:chat_id`
 
 Example:
@@ -164,14 +164,6 @@ The node will automatically extract from workflow:
 All this data is saved in PNG metadata in A1111 format.
 
 ## ⚙️ Parameters
-
-### TelegramConfig (one-time setup)
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| **bot_token** | STRING | Telegram bot token (saved to config) |
-| **default_chat_id** | STRING | Default chat/channel ID (optional) |
-| **lora_mapping** | STRING (multiline) | LoRA → channel mapping (one line = one rule: `lora_name:chat_id`) |
 
 ### TelegramSender (main node)
 
@@ -303,7 +295,7 @@ The extension can automatically send images to different channels based on LoRA 
 
 ### How to set up:
 
-1. In the **TelegramConfig** node, fill in the **lora_mapping** field:
+1. In ComfyUI Settings (⚙ → Telegram Sender), fill in the **LoRA to Channel Mapping** field:
 ```
 anime:-1001111111111
 realistic:-1002222222222
@@ -415,16 +407,18 @@ This format is compatible with:
 
 ### "No bot token configured" error
 
-1. Add **TelegramConfig** node to workflow
-2. Enter token and default_chat_id
-3. Run workflow once
-4. Check that file `ComfyUI/custom_nodes/ComfyUI-Telegram-Sender/config/telegram_config.json` was created
+1. Open ComfyUI Settings (⚙ → Telegram Sender)
+2. Enter your **bot_token** (received from @BotFather)
+3. Enter **default_chat_id** (optional)
+4. Settings are saved automatically
 
-### Token not saving
+**Note:** If you have an old `config/telegram_config.json` file, it will be automatically migrated to the new format on first startup.
 
-- Check write permissions to extension folder
-- Try creating `config` folder manually
+### Settings not saving
+
+- Check write permissions to ComfyUI user directory
 - Look at console for errors during saving
+- Settings are stored in `<user_directory>/settings/Telegram.json`
 
 ### "Invalid bot token" error
 
@@ -447,24 +441,24 @@ This format is compatible with:
 
 ### Want to use different tokens for different workflows
 
-Use the `bot_token_override` parameter in TelegramSender node - it will override the token from config for that specific node.
+Use the `bot_token_override` parameter in TelegramSender node - it will override the token from settings for that specific node.
 
 ## 🆚 Differences from AUTOMATIC1111 version
 
 | AUTOMATIC1111 | ComfyUI |
 |---------------|---------|
 | Automatic hook on save | Explicit node in workflow |
-| Settings in UI | Separate TelegramConfig node |
-| Token in UI settings | Token in protected config file |
+| Settings in UI | ComfyUI Settings menu |
+| Token in UI settings | Token in ComfyUI settings |
 | LoRA mapping | Same |
 | Unified global settings | Each node is independent |
 
 ## 🔒 Security
 
-- **Token is stored locally** in file `config/telegram_config.json` inside extension folder
+- **Token is stored locally** in `<user_directory>/settings/Telegram.json`
 - **Token is NOT saved in workflow** - can safely share workflow files
-- Config file is created automatically on first run of TelegramConfig node
-- Recommended to add `config/` to `.gitignore` if you version your extensions
+- Settings are managed through ComfyUI native Settings API
+- Recommended to use `--user-directory` flag for portable setups
 
 ## 📝 License
 
