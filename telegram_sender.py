@@ -8,12 +8,12 @@ import sys
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 sys.path.append("../../")
-import folder_paths
+import folder_paths # type: ignore
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 from datetime import datetime
-from server import PromptServer
+from server import PromptServer # type: ignore
 from aiohttp import web
 
 # --- API FOR MIGRATION ---
