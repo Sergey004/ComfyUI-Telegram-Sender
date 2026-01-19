@@ -12,175 +12,119 @@ const TELEGRAM_SETTINGS = [
         name: "Bot Token",
         type: "string",
         defaultValue: "",
-        tooltip: "Telegram bot token from @BotFather\n\nFormat: 123456789:ABCdefGHIjklMNOpqrsTUVwxyz\n\n💡 How to get:\n1. Open @BotFather in Telegram\n2. Send /newbot command\n3. Follow instructions\n4. Copy the token\n\n⚠️ SECURITY WARNING:\n- Never share your bot token\n- Token gives full control over your bot\n- Keep it secret!\n\n📖 Docs: https://core.telegram.org/bots/api",
-        onChange: (value) => {
-            // Debounced save to prevent spamming
-            debouncedSaveTelegramSettings();
-        }
+        tooltip: "Telegram bot token from @BotFather",
     },
     {
         id: "Telegram.DefaultChatId",
         name: "Default Chat ID",
         type: "string",
         defaultValue: "",
-        tooltip: "Default chat/channel ID for sending images\n\nPersonal chat: 123456789\nChannel: -1001234567890\nGroup: -1009876543210\n\n💡 Leave empty to specify in each node\n\n📖 How to get ID:\n1. Send message to bot\n2. Visit: https://api.telegram.org/bot<TOKEN>/getUpdates\n3. Find \"chat\":{\"id\":NUMBER}\n\n⚠️ For channels: bot must be admin",
-        onChange: (value) => {
-            debouncedSaveTelegramSettings();
-        }
+        tooltip: "Default chat/channel ID for sending images",
     },
+    // --- НАЧАЛО ИЗМЕНЕНИЙ: КАСТОМНОЕ ПОЛЕ LORA MAPPING ---
     {
         id: "Telegram.LoraMapping",
         name: "LoRA to Channel Mapping",
-        type: "text",
+        // Вместо строки используем функцию для создания HTML элемента
+        type: (name, setter, value) => {
+            const input = document.createElement("textarea");
+            
+            // Стилизуем под ComfyUI (темная тема)
+            input.value = value || "";
+            input.style.width = "100%";     // На всю ширину
+            input.style.height = "120px";   // Высота 120 пикселей
+            input.style.resize = "vertical";// Можно растягивать вниз
+            input.style.borderRadius = "4px";
+            input.style.backgroundColor = "var(--comfy-input-bg)"; // Цвет фона Comfy
+            input.style.color = "var(--input-text)";               // Цвет текста Comfy
+            input.style.border = "1px solid var(--border-color)";
+            input.style.padding = "5px";
+            input.style.fontFamily = "monospace"; // Моноширинный шрифт для удобства
+            
+            // Сохраняем значение при изменении (когда убрали фокус)
+            input.addEventListener("change", () => {
+                setter(input.value);
+            });
+            
+            return input;
+        },
         defaultValue: "",
-        tooltip: "Automatic routing based on LoRA names\n\nFormat: one per line: lora_name:chat_id\n\nExample:\nanime:-1001111111111\nrealistic:-1002222222222\ncharacter:-1003333333333\n\n💡 Partial match:\n- \"anime_style_v2\" matches \"anime\"\n- \"realistic_vision_xl\" matches \"realistic\"\n\n📖 See: Automatic LoRA Routing section in README",
-        onChange: (value) => {
-            debouncedSaveTelegramSettings();
-        }
+        tooltip: "Format (one per line):\nlora_name:chat_id\nanime:-100123456",
     },
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
     {
         id: "Telegram.NSFWChannelId",
         name: "NSFW Channel ID",
         type: "string",
         defaultValue: "",
-        tooltip: "Channel ID for NSFW content\n\nFormat: -1001234567890 (for channels)\n\n💡 Used when:\n- enable_nsfw_detection is enabled in node\n- \"nsfw\" keyword found in positive prompt\n\n⚠️ Bot must be admin in this channel",
-        onChange: (value) => {
-            debouncedSaveTelegramSettings();
-        }
+        tooltip: "Channel ID for NSFW content",
     },
     {
         id: "Telegram.UnsortedChannelId",
         name: "Unsorted Channel ID",
         type: "string",
         defaultValue: "",
-        tooltip: "Fallback channel for unrouted images\n\nFormat: -1001234567890 (for channels)\n\n💡 Used when:\n- No explicit chat_id specified\n- No LoRA routing match\n- No NSFW match\n\n📖 Channel determination priority:\n1. Explicit chat_id in node\n2. NSFW detection\n3. LoRA routing\n4. Default chat_id\n5. Unsorted channel",
-        onChange: (value) => {
-            debouncedSaveTelegramSettings();
-        }
+        tooltip: "Fallback channel for unrouted images",
     },
 ];
-
-// Flag to prevent saving during initial load
-let isLoading = false;
-let saveTimeout = null;
-
-// Load settings from Python backend
-async function loadTelegramSettings() {
-    isLoading = true; // Block saving during load
-    
-    try {
-        const response = await api.fetchApi("/telegram/get_settings");
-        if (response.ok) {
-            const data = await response.json();
-            if (data.config) {
-                app.ui.settings.setSettingValue("Telegram.BotToken", data.config.bot_token || "");
-                app.ui.settings.setSettingValue("Telegram.DefaultChatId", data.config.default_chat_id || "");
-                app.ui.settings.setSettingValue("Telegram.LoraMapping", data.config.lora_mapping || "");
-                app.ui.settings.setSettingValue("Telegram.NSFWChannelId", data.config.nsfw_channel_id || "");
-                app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.config.unsorted_channel_id || "");
-                console.log("[Telegram Sender] ✅ Settings loaded from backend");
-            }
-        }
-    } catch (error) {
-        console.log("[Telegram Sender] ⚠️ Failed to load settings:", error);
-    } finally {
-        isLoading = false; // Unblock saving
-    }
-}
-
-// Migrate settings from old config file if exists
-async function migrateFromOldConfig() {
-    try {
-        const response = await api.fetchApi("/telegram/migrate_config", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" }
-        });
-        
-        if (response.ok) {
-            const data = await response.json();
-            if (data.migrated) {
-                console.log("[Telegram Sender] ✅ Settings migrated from old config");
-                
-                // Update UI settings with migrated values
-                if (data.config) {
-                    app.ui.settings.setSettingValue("Telegram.BotToken", data.config.bot_token || "");
-                    app.ui.settings.setSettingValue("Telegram.DefaultChatId", data.config.default_chat_id || "");
-                    app.ui.settings.setSettingValue("Telegram.LoraMapping", data.config.lora_mapping || "");
-                    app.ui.settings.setSettingValue("Telegram.NSFWChannelId", data.config.nsfw_channel_id || "");
-                    app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.config.unsorted_channel_id || "");
-                }
-            }
-        }
-    } catch (error) {
-        console.log("[Telegram Sender] ⚠️ Migration check skipped:", error);
-    }
-}
-
-// Debounced save to prevent spamming
-function debouncedSaveTelegramSettings() {
-    // Don't save during initial load
-    if (isLoading) {
-        return;
-    }
-    
-    // Clear existing timeout
-    if (saveTimeout) {
-        clearTimeout(saveTimeout);
-    }
-    
-    // Set new timeout
-    saveTimeout = setTimeout(() => {
-        saveTelegramSettings();
-    }, 1000); // Save 1 second after last change
-}
-
-// Save settings to Python backend
-async function saveTelegramSettings() {
-    const config = {
-        bot_token: app.ui.settings.getSettingValue("Telegram.BotToken") || "",
-        default_chat_id: app.ui.settings.getSettingValue("Telegram.DefaultChatId") || "",
-        lora_mapping: app.ui.settings.getSettingValue("Telegram.LoraMapping") || "",
-        nsfw_channel_id: app.ui.settings.getSettingValue("Telegram.NSFWChannelId") || "",
-        unsorted_channel_id: app.ui.settings.getSettingValue("Telegram.UnsortedChannelId") || ""
-    };
-    
-    try {
-        await api.fetchApi("/telegram/save_settings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(config)
-        });
-        console.log("[Telegram Sender] ✅ Settings saved to backend");
-        
-        // Show success toast notification
-        app.extensionManager.toast.add({
-            severity: 'success',
-            summary: '✅ Settings Saved',
-            detail: 'Telegram settings have been saved successfully!',
-            life: 3000
-        });
-    } catch (error) {
-        console.error("[Telegram Sender] ❌ Failed to save settings:", error);
-        
-        // Show error toast notification
-        app.extensionManager.toast.add({
-            severity: 'error',
-            summary: '❌ Save Failed',
-            detail: 'Failed to save settings. Check console for details.',
-            life: 5000
-        });
-    }
-}
 
 app.registerExtension({
     name: "comfy.telegram_sender",
     settings: TELEGRAM_SETTINGS,
     
+    // Эта функция запускается один раз при загрузке страницы ComfyUI
     async setup() {
-        // First, load current settings from backend
-        await loadTelegramSettings();
-        
-        // Then, migrate from old config file if needed
-        await migrateFromOldConfig();
+        try {
+            // 1. Проверяем, пуст ли токен в ТЕКУЩИХ настройках ComfyUI
+            // Если там что-то есть, значит пользователь уже настроил или миграция прошла
+            const currentToken = app.ui.settings.getSettingValue("Telegram.BotToken", "");
+            
+            if (currentToken) {
+                return; // Миграция не нужна, выходим
+            }
+
+            console.log("[Telegram Sender] 📥 Checking for legacy config...");
+
+            // 2. Запрашиваем данные у нашего Python API (который мы добавили на Шаге 1)
+            const response = await api.fetchApi("/telegram_sender/get_legacy_config");
+            
+            if (response.status === 200) {
+                const data = await response.json();
+                
+                // Проверяем, пришло ли что-то полезное
+                if (data && (data.bot_token || data.default_chat_id)) {
+                    console.log("[Telegram Sender] ♻️ Legacy config found! Migrating settings safely via UI API...");
+                    
+                    // 3. Используем официальный API ComfyUI для установки значений
+                    // Это инициирует правильное сохранение файла comfy.settings.json самим ComfyUI
+                    
+                    if (data.bot_token) {
+                        app.ui.settings.setSettingValue("Telegram.BotToken", data.bot_token);
+                    }
+                    if (data.default_chat_id) {
+                        app.ui.settings.setSettingValue("Telegram.DefaultChatId", data.default_chat_id);
+                    }
+                    if (data.lora_mapping) {
+                        app.ui.settings.setSettingValue("Telegram.LoraMapping", data.lora_mapping);
+                    }
+                    if (data.nsfw_channel_id) {
+                        app.ui.settings.setSettingValue("Telegram.NSFWChannelId", data.nsfw_channel_id);
+                    }
+                    if (data.unsorted_channel_id) {
+                        app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.unsorted_channel_id);
+                    }
+                    
+                    console.log("[Telegram Sender] ✅ Settings migrated successfully!");
+                    app.extensionManager.toast.add({
+                    severity: 'success',
+                    summary: '✅ Settings migrated successfully!',
+                    detail: 'Telegram settings migrated successfully!',
+                    life: 3000
+                    });
+                }
+            }
+        } catch (error) {
+            console.error("[Telegram Sender] Migration check failed:", error);
+        }
     }
 });

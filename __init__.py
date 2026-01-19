@@ -1,13 +1,7 @@
 from .telegram_sender import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from .telegram_api import register_routes
-import execution
 
 WEB_DIRECTORY = "./js"
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
-
-# Register API routes
-WEBHOOKS = []
-register_routes(WEBHOOKS)
 
 try:
     print("[Telegram Sender] Trying to import civitai_fetch...")
