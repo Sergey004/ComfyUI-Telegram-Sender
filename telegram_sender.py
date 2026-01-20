@@ -77,8 +77,8 @@ except:
         def get_parameters_str(p): return ""
 
 # --- RESTORED: NSFW TRIGGERS LOGIC ---
-CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
-NSFW_TRIGGERS_FILE = os.path.join(CONFIG_DIR, "nsfw_triggers.json")
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+NSFW_TRIGGERS_FILE = os.path.join(ASSETS_DIR , "nsfw_triggers.json")
 _nsfw_triggers_cache = None
 _nsfw_triggers_mtime = None
 
