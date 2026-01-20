@@ -106,11 +106,11 @@ Robust version: Uses folder_paths to find config reliably.
 import os
 import json
 import sys
-from comfy.settings import Settings
+from comfy.settings import Settings # type: ignore
 
 # Пытаемся импортировать менеджер путей ComfyUI
 try:
-    import folder_paths
+    import folder_paths # type: ignore
 except ImportError:
     folder_paths = None
 
