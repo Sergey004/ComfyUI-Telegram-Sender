@@ -16,6 +16,8 @@ from datetime import datetime
 from urllib3.exceptions import ProtocolError
 from server import PromptServer
 from aiohttp import web
+from .telegram_modules.utils.schedulerl_sel import SchedulerSelectorKSampler
+
 
 # --- PART 1: API FOR MIGRATION ---
 @PromptServer.instance.routes.get("/telegram_sender/get_legacy_config")
@@ -485,5 +487,5 @@ class TelegramSender:
         return filename_template
 
 # Mappings
-NODE_CLASS_MAPPINGS = { "TelegramConfig": TelegramConfig, "TelegramSender": TelegramSender }
-NODE_DISPLAY_NAME_MAPPINGS = { "TelegramConfig": "⚙️ Telegram Config", "TelegramSender": "📤 Send to Telegram" }
+NODE_CLASS_MAPPINGS = { "TelegramConfig": TelegramConfig, "TelegramSender": TelegramSender, "Schedulerselector": SchedulerSelectorKSampler, }
+NODE_DISPLAY_NAME_MAPPINGS = { "TelegramConfig": "⚙️ Telegram Config", "TelegramSender": "📤 Send to Telegram", "Schedulerselector":"Scheduler Selector (for KSampler (Efficient))"}
