@@ -2,6 +2,8 @@
 
 A custom node for ComfyUI that automatically sends generated images to Telegram channels or chats. 
 
+Can be broken on latest versions
+
 ## ✨ Features
 
 - 🔐 **Secure token storage** - token is saved in config file, not in workflow
