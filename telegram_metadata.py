@@ -1,6 +1,6 @@
 """
 Metadata extraction for TelegramSender
-EXACT copy of SaveImageWithMetaData.gen_pnginfo() from comfyui_image_metadata_extension
+Updated for ComfyUI 0.3.68+ with async support
 """
 
 try:
@@ -14,16 +14,18 @@ except (ImportError, ModuleNotFoundError):
 
 class TelegramMetadata:
     """
-    Direct copy of gen_pnginfo from SaveImageWithMetaData
-    This ensures 100% compatibility with the original extension
+    Metadata extraction supporting async Capture.get_inputs()
+    ComfyUI 0.3.68+ compatible
     """
     
     @classmethod
-    def gen_pnginfo(cls, prompt, prefer_nearest=True):
+    async def gen_pnginfo(cls, prompt, prefer_nearest=True, batch_index=0):
         """
-        EXACT copy of SaveImageWithMetaData.gen_pnginfo()
+        Extract metadata from workflow using async capture
+        Supports ComfyUI 0.3.68+ with HierarchicalCache
         """
-        inputs = Capture.get_inputs()
+        # Await the async get_inputs() call
+        inputs = await Capture.get_inputs()
         trace_tree_from_this_node = Trace.trace(hook.current_save_image_node_id, prompt)
         inputs_before_this_node = Trace.filter_inputs_by_trace_tree(inputs, trace_tree_from_this_node, prefer_nearest)
 
@@ -34,18 +36,18 @@ class TelegramMetadata:
         else:
             inputs_before_sampler_node = {}
 
-        return Capture.gen_pnginfo_dict(inputs_before_sampler_node, inputs_before_this_node, prompt)
+        return Capture.gen_pnginfo_dict(inputs_before_sampler_node, inputs_before_this_node, prompt, batch_index=batch_index)
     
     @staticmethod
-    def get_metadata(prompt, prefer_nearest=True):
+    async def get_metadata(prompt, prefer_nearest=True, batch_index=0):
         """
-        Extract metadata from workflow using same logic as SaveImageWithMetaData
+        Extract metadata from workflow (async version)
         """
         if not CAPTURE_AVAILABLE:
             return {}
         
         try:
-            return TelegramMetadata.gen_pnginfo(prompt, prefer_nearest)
+            return await TelegramMetadata.gen_pnginfo(prompt, prefer_nearest, batch_index)
         except Exception as e:
             print(f"[TelegramMetadata] Warning: Could not extract metadata: {e}")
             return {}
@@ -53,7 +55,7 @@ class TelegramMetadata:
     @staticmethod
     def get_parameters_str(pnginfo_dict):
         """
-        Get A1111-style parameters string
+        Get A1111-style parameters string (sync method)
         """
         if not CAPTURE_AVAILABLE:
             return ""

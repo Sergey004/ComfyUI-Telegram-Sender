@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 import requests
@@ -155,7 +156,7 @@ class TelegramSender:
             except: pass
         return config
 
-    def send_to_telegram(self, images, chat_id="", bot_token_override="", 
+    async def send_to_telegram(self, images, chat_id="", bot_token_override="", 
                         positive_prompt="", negative_prompt="",
                         send_as_document=False, max_size=2560, 
                         landscape_max_width=5120, enable_nsfw_detection=False,
@@ -177,7 +178,7 @@ class TelegramSender:
         if not unsorted_channel_id: unsorted_channel_id = full_config.get("unsorted_channel_id", "")
 
         metadata_text = self._build_metadata_text(positive_prompt, negative_prompt, prompt, extra_pnginfo, enable_enhanced_metadata)
-        loras_in_workflow = self._extract_loras_from_workflow(prompt, extra_pnginfo, enable_enhanced_metadata) if prompt else []
+        loras_in_workflow = await self._extract_loras_from_workflow(prompt, extra_pnginfo, enable_enhanced_metadata) if prompt else []
 
         for i, image in enumerate(images):
             try:
@@ -186,7 +187,7 @@ class TelegramSender:
                 
                 pnginfo_dict = {}
                 if enable_enhanced_metadata and prompt:
-                    try: pnginfo_dict = TelegramMetadata.get_metadata(prompt)
+                    try: pnginfo_dict = await TelegramMetadata.get_metadata(prompt)
                     except: pass
                 
                 formatted_filename = self._format_filename(filename_prefix.strip(), pnginfo_dict)
@@ -298,12 +299,12 @@ class TelegramSender:
         return ", ".join(params)
 
     # --- ORIGINAL LORA EXTRACTION (CRITICAL FOR ROUTING) ---
-    def _extract_loras_from_workflow(self, prompt_dict, extra_pnginfo=None, enable_enhanced=True):
+    async def _extract_loras_from_workflow(self, prompt_dict, extra_pnginfo=None, enable_enhanced=True):
         loras = []
         if not prompt_dict: return loras
         if enable_enhanced:
             try:
-                pnginfo_dict = TelegramMetadata.get_metadata(prompt_dict)
+                pnginfo_dict = await TelegramMetadata.get_metadata(prompt_dict)
                 if pnginfo_dict and "Lora hashes" in pnginfo_dict:
                     for part in pnginfo_dict["Lora hashes"].split(","):
                         lora_name = part.split(":")[0].strip()

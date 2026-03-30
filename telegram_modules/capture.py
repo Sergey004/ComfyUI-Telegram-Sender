@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -10,79 +11,621 @@ from .utils.log import print_warning
 
 from nodes import NODE_CLASS_MAPPINGS
 from .trace import Trace
-from execution import get_input_data
-from comfy_execution.graph import DynamicPrompt
 
 
 class OutputCacheCompat:
-    """Handles cache access across ComfyUI versions.
-    Uses get_output_cache() in version 0.3.67 and newer, get() in 0.3.66 and lower.
+    """Stub — HierarchicalCache (ComfyUI 0.3.68+) uses async frozenset-keyed
+    lookups that cannot be called synchronously. All resolution is done via
+    pure prompt-graph walking instead. This class is kept for API compatibility
+    but _get_outputs_cache() always returns None so it is never instantiated.
     """
     def __init__(self, cache):
-        self._cache = cache
+        self._cache = None
+    def get(self, node_id): return None
+    def get_output_cache(self, node_id, unique_id=None): return None
+    def get_cache(self, node_id, unique_id=None): return None
 
-    def get_output_cache(self, input_unique_id, unique_id=None):
-        # For version 0.3.67 and newer
-        if hasattr(self._cache, "get"):
-            return self._cache.get(input_unique_id)
-        return getattr(self._cache, "outputs", {}).get(input_unique_id, None)
 
-    def get(self, input_unique_id):
-        # For version 0.3.66 and lower
-        if hasattr(self._cache, "get"):
-            return self._cache.get(input_unique_id)
-        return getattr(self._cache, "outputs", {}).get(input_unique_id, None)
-    
-    # fix: https://github.com/edelvarden/comfyui_image_metadata_extension/issues/67
-    def get_cache(self, input_unique_id, unique_id=None):
-        if hasattr(self._cache, "get_cache"):
-            return self._cache.get_cache(input_unique_id, unique_id)
-        return self.get_output_cache(input_unique_id, unique_id)
+
+# ---------------------------------------------------------------------------
+# Runtime-resolved node text store.
+# Populated by Capture.get_inputs() after awaiting get_input_data() per node.
+# Keyed by node_id (str) -> resolved text (str).
+# This is the only reliable source for wildcard-expanded / dynamic text.
+# ---------------------------------------------------------------------------
+_resolved_node_texts: dict = {}
+
+
+def _clear_resolved_texts():
+    _resolved_node_texts.clear()
+
+
+# ---------------------------------------------------------------------------
+# Helpers to walk the prompt graph and extract raw text regardless of how
+# many indirection levels (wired text nodes, concat nodes, etc.) there are.
+# ---------------------------------------------------------------------------
+
+# Node class names that are text-concatenation / joining nodes.
+_CONCAT_CLASS_HINTS = [
+    "concat", "join", "combine", "mixer",
+    "string", "text",        # many "TextConcatenate", "StringJoin" nodes
+]
+
+# Input key names that carry text payloads inside concat-style nodes.
+_TEXT_KEY_HINTS = [
+    "text", "string", "input", "value", "prompt",
+    "text1", "text2", "text_a", "text_b", "string_a", "string_b",
+    "string1", "string2",
+    "positive_prompt", "negative_prompt",
+]
+
+# Node class name fragments for dynamic text-generator nodes whose output
+# text only exists at runtime.  We fall back to their best static input.
+_DYNAMIC_TEXT_NODES = {
+    # class_type_lower → list of input keys to try in order
+    "wildcardmanager":      ["input_text"],
+    "wildcard":             ["text", "input_text"],
+    "dynamicprompt":        ["text", "template"],
+    "randomlorafoldermodel":["extra_trigger_words"],  # string output slot 2
+    "randomlora":           ["extra_trigger_words"],
+}
+
+
+def _is_link(value):
+    """Return True when *value* looks like a ComfyUI node-output link [node_id, index]."""
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and isinstance(value[0], (str, int))
+        and isinstance(value[1], int)
+    )
+
+
+def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=0):
+    """
+    Recursively resolve *value* to a plain string by walking the prompt graph.
+
+    *value* can be:
+      - A plain string  → returned as-is.
+      - A link          → follow to the source node and recurse.
+      - None            → returns None.
+
+    *batch_index* selects which entry to use when a cache slot holds a list
+    of strings (i.e. when a list was fed into the node, generating one image
+    per entry).  Pass the current image's position in the batch so each image
+    gets its own prompt text rather than always the first one.
+
+    The function tries (in order):
+      1. The execution cache (already-evaluated output).
+      2. A ``text`` / ``string`` / similar field on the source node's inputs
+         (handles CLIPTextEncode with a wired-in text node).
+      3. Concatenation / joining nodes whose text inputs are all resolved
+         recursively and joined with the node's separator.
+
+    *_visited* prevents infinite loops on cyclic graphs.
+    """
+    if _visited is None:
+        _visited = set()
+
+    if value is None:
+        return None
+
+    # Already a plain string – nothing to resolve.
+    if isinstance(value, str):
+        return value if value.strip() else None
+
+    # Unwrap single-element lists that ComfyUI sometimes produces.
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return _resolve_text_from_graph(value[0], prompt, outputs, _visited, batch_index)
+
+    if not _is_link(value):
+        return None
+
+    node_id = str(value[0])
+    out_slot = value[1] if len(value) > 1 else 0
+
+    if node_id in _visited:
+        return None
+    _visited = _visited | {node_id}
+
+    # ── 1. Runtime interception cache (populated by HierarchicalCache.set patch) ────────
+    # Check slot-specific key first, then plain node_id key.
+    slot_key = f"{node_id}:{out_slot}"
+    cached_text = _resolved_node_texts.get(slot_key) or _resolved_node_texts.get(node_id)
+    if cached_text and isinstance(cached_text, str) and cached_text.strip():
+        return cached_text
+
+    # ── 2. Walk the graph node ───────────────────────────────────────────────
+    node = prompt.get(node_id)
+    if node is None:
+        return None
+
+    node_inputs = node.get("inputs", {})
+    class_type = node.get("class_type", "").lower()
+
+    # Direct text field on this node (e.g. CLIPTextEncode whose "text" is
+    # a hard-coded string, or a primitive String node).
+    for key in ("text", "string", "value", "val", "prompt",
+                "positive_prompt", "negative_prompt"):
+        raw = node_inputs.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and raw.strip():
+            return raw
+        if _is_link(raw):
+            resolved = _resolve_text_from_graph(raw, prompt, outputs, _visited)
+            if resolved:
+                return resolved
+
+    # ── 3. Concatenation / joining nodes ────────────────────────────────────
+    is_concat = any(hint in class_type for hint in _CONCAT_CLASS_HINTS)
+    if is_concat:
+        # Collect all text-like input keys in stable order.
+        candidate_keys = sorted(
+            (k for k in node_inputs if any(h in k.lower() for h in _TEXT_KEY_HINTS)),
+            key=lambda k: (re.sub(r'\d+', '', k),
+                           int(re.search(r'\d+', k).group()) if re.search(r'\d+', k) else 0)
+        )
+        parts = []
+        for k in candidate_keys:
+            resolved = _resolve_text_from_graph(node_inputs[k], prompt, outputs, _visited, batch_index)
+            if resolved:
+                parts.append(resolved)
+
+        if parts:
+            sep_raw = node_inputs.get("delimiter", node_inputs.get("separator", " "))
+            sep = sep_raw.replace("\\n", "\n") if isinstance(sep_raw, str) else " "
+            return sep.join(parts)
+
+    # ── 4. Known dynamic text-generator nodes ───────────────────────────────
+    # These nodes compute their output at execution time (wildcard expansion,
+    # random LoRA selection, etc.).  We fall back to their best static input
+    # as an approximation rather than returning nothing.
+    for cls_hint, fallback_keys in _DYNAMIC_TEXT_NODES.items():
+        if cls_hint in class_type:
+            for fk in fallback_keys:
+                raw = node_inputs.get(fk)
+                if raw is None:
+                    continue
+                if isinstance(raw, str) and raw.strip():
+                    return raw
+                if _is_link(raw):
+                    resolved = _resolve_text_from_graph(raw, prompt, outputs, _visited, batch_index)
+                    if resolved:
+                        return resolved
+            break  # matched a dynamic node — don't fall through to generic scan
+
+    # ── 5. Fallback: scan only text-hinted input keys, never model/clip/vae ──
+    # IMPORTANT: skip nodes already matched as dynamic to prevent infinite loops
+    # where e.g. RandomLoraFolderModel.extra_trigger_words links back upstream.
+    _NON_TEXT_KEYS = {"model", "clip", "vae", "control_net", "image", "mask",
+                      "latent", "latent_image", "samples", "upscale_model",
+                      "positive", "negative", "conditioning"}
+    is_dynamic = any(h in class_type for h in _DYNAMIC_TEXT_NODES)
+    if not is_dynamic:
+        for key, raw in node_inputs.items():
+            if key.lower() in _NON_TEXT_KEYS:
+                continue
+            if _is_link(raw):
+                # Only follow if the key name hints at text content
+                if any(h in key.lower() for h in _TEXT_KEY_HINTS):
+                    resolved = _resolve_text_from_graph(raw, prompt, outputs, _visited, batch_index)
+                    if resolved:
+                        return resolved
+
+    return None
+
+
+def _resolve_clip_text_encode_prompt(node_id, prompt, outputs, batch_index=0):
+    """
+    Given a CLIPTextEncode node's *node_id*, return its resolved text string.
+
+    The CLIPTextEncode node has a single ``text`` input which may be:
+      - A hard-coded string.
+      - A link to another node (primitive, text node, concat node, …).
+      - A list of strings when a list was wired in (one entry per batch image).
+    """
+    nid = str(node_id)
+
+    # ── 1. Runtime-resolved text (populated by await get_input_data) ─────────
+    # This is the only reliable source when "text" is wired from a dynamic
+    # node (WildcardManager, StringConcatenate, etc.).
+    cached_text = _resolved_node_texts.get(nid)
+    if cached_text:
+        return cached_text
+
+    # ── 2. Static graph walk (fallback for hardcoded text) ───────────────────
+    node = prompt.get(nid)
+    if node is None:
+        return None
+    raw = node.get("inputs", {}).get("text")
+    if raw is None:
+        return None
+    # Hard-coded string directly in the node
+    if isinstance(raw, str):
+        return raw if raw.strip() else None
+    # A link [node_id, output_index] — resolve through the graph
+    if _is_link(raw):
+        return _resolve_text_from_graph(raw, prompt, outputs, batch_index=batch_index)
+    # A genuine list of strings (one per batch entry) — NOT a link
+    if isinstance(raw, list) and raw and all(isinstance(x, str) for x in raw):
+        idx = min(batch_index, len(raw) - 1)
+        return raw[idx] if raw[idx].strip() else None
+    return None
+
+
+def _follow_conditioning_to_clip_text(cond_value, prompt, outputs, _depth=0, batch_index=0):
+    """
+    Follow a conditioning link chain until we reach a CLIPTextEncode and
+    resolve its text.
+
+    *batch_index* is forwarded all the way down so that when the text source
+    is a list (one string per batch image), the correct entry is selected.
+    """
+    if _depth > 20:  # safety limit
+        return None
+    if not _is_link(cond_value):
+        return None
+
+    src_id = str(cond_value[0])
+    src_node = prompt.get(src_id)
+    if src_node is None:
+        return None
+
+    src_class = src_node.get("class_type", "")
+    src_inputs = src_node.get("inputs", {})
+
+    # ── Direct CLIPTextEncode ─────────────────────────────────────────────
+    if src_class == "CLIPTextEncode":
+        return _resolve_clip_text_encode_prompt(src_id, prompt, outputs, batch_index)
+
+    # ── Node with its own text field (e.g. some conditioning wrappers) ───
+    for k in ("text", "string", "prompt"):
+        raw = src_inputs.get(k)
+        if raw is not None:
+            resolved = _resolve_text_from_graph(raw, prompt, outputs, batch_index=batch_index)
+            if resolved:
+                return resolved
+
+    # ── Conditioning passthrough: follow the *first* conditioning input ──
+    PASSTHROUGH_KEYS = ("conditioning", "cond", "conditioning_1", "conditioning_2")
+    for k in PASSTHROUGH_KEYS:
+        if k in src_inputs:
+            result = _follow_conditioning_to_clip_text(
+                src_inputs[k], prompt, outputs, _depth + 1, batch_index
+            )
+            if result:
+                return result
+
+    # ── Last resort: any link-valued input that isn't a model/image slot ─
+    _SKIP_KEYS = {"model", "clip", "vae", "image", "mask", "latent",
+                  "latent_image", "samples", "positive", "negative"}
+    for k, v in src_inputs.items():
+        if k in _SKIP_KEYS:
+            continue
+        if _is_link(v):
+            result = _follow_conditioning_to_clip_text(v, prompt, outputs, _depth + 1, batch_index)
+            if result:
+                return result
+
+    return None
+
+
+def _find_guider_node_with_conditioning(node_id, prompt):
+    """
+    Given a node_id, follow cfg_guider/guider links to find a node that has
+    both 'positive' and 'negative' inputs (e.g. CFGGuider, BasicGuider).
+    Returns (node_id, node_dict) or (None, None).
+    """
+    visited = set()
+    queue = [str(node_id)]
+    while queue:
+        nid = queue.pop(0)
+        if nid in visited:
+            continue
+        visited.add(nid)
+        node = prompt.get(nid)
+        if node is None:
+            continue
+        node_inputs = node.get("inputs", {})
+        # Found a node that has conditioning slots
+        if "positive" in node_inputs or "negative" in node_inputs:
+            return nid, node
+        # Follow guider-type links deeper
+        for k in ("cfg_guider", "guider", "positive_guider", "negative_guider",
+                  "conditioning", "cond"):
+            v = node_inputs.get(k)
+            if _is_link(v):
+                queue.append(str(v[0]))
+    return None, None
+
+
+def _find_prompt_texts(prompt, outputs, batch_index=0):
+    """
+    Walk the prompt graph to find the positive and negative prompt strings.
+
+    Handles two major workflow topologies:
+
+    Classic KSampler topology:
+        KSampler(positive=COND, negative=COND, seed, steps, cfg, ...)
+
+    SamplerCustomAdvanced topology (used by Flux / res_multistep_simple etc.):
+        SamplerCustomAdvanced(noise=NOISE, cfg_guider=GUIDER, sampler=SAMPLER, sigmas=SIGMAS)
+        CFGGuider(model, positive=COND, negative=COND, cfg)
+
+    Both are detected and the conditioning chains are resolved independently
+    to avoid swapping positive / negative.
+    """
+    SAMPLER_CLASSES = {
+        "KSampler", "KSamplerAdvanced", "SamplerCustom",
+        "KSamplerSelect", "KSampler_inspire",
+        "KSamplerAdvancedPipe", "KSamplerPipe",
+        "FluxKSampler", "FluxSampler",
+        "SamplerCustomAdvanced",
+    }
+    # Inputs that indicate this node is a sampler even if the class name is unknown
+    SAMPLER_HINT_KEYS = {"seed", "steps", "cfg", "sampler_name", "noise_seed", "denoise",
+                         "cfg_guider", "noise", "sigmas"}
+    # Nodes that hold conditioning but are NOT the sampler
+    GUIDER_CLASSES = {"CFGGuider", "BasicGuider", "DualCFGGuider", "Guider"}
+
+    for node_id, node in prompt.items():
+        class_type = node.get("class_type", "")
+        node_inputs = node.get("inputs", {})
+
+        # ── Path A: classic node with positive+negative directly ─────────────
+        has_pos_neg = "positive" in node_inputs and "negative" in node_inputs
+        is_classic_sampler = (
+            class_type in SAMPLER_CLASSES
+            or (has_pos_neg and bool(SAMPLER_HINT_KEYS & set(node_inputs.keys())))
+            or (has_pos_neg and class_type in GUIDER_CLASSES)
+        )
+        if is_classic_sampler:
+            pos_text = _follow_conditioning_to_clip_text(
+                node_inputs.get("positive"), prompt, outputs, batch_index=batch_index
+            )
+            neg_text = _follow_conditioning_to_clip_text(
+                node_inputs.get("negative"), prompt, outputs, batch_index=batch_index
+            )
+            if pos_text or neg_text:
+                return pos_text, neg_text
+
+        # ── Path B: SamplerCustomAdvanced-style (cfg_guider link) ────────────
+        if (class_type in SAMPLER_CLASSES
+                or bool(SAMPLER_HINT_KEYS & set(node_inputs.keys()))):
+            for guider_key in ("cfg_guider", "guider"):
+                guider_link = node_inputs.get(guider_key)
+                if not _is_link(guider_link):
+                    continue
+                g_nid, g_node = _find_guider_node_with_conditioning(
+                    str(guider_link[0]), prompt
+                )
+                if g_node is None:
+                    continue
+                g_inputs = g_node.get("inputs", {})
+                pos_text = _follow_conditioning_to_clip_text(
+                    g_inputs.get("positive"), prompt, outputs, batch_index=batch_index
+                )
+                neg_text = _follow_conditioning_to_clip_text(
+                    g_inputs.get("negative") or g_inputs.get("conditioning"),
+                    prompt, outputs, batch_index=batch_index
+                )
+                if pos_text or neg_text:
+                    return pos_text, neg_text
+
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Main Capture class (original logic preserved, prompt resolution patched)
+# ---------------------------------------------------------------------------
+
+
+def _get_outputs_cache():
+    """
+    The new HierarchicalCache (ComfyUI 0.3.68+) stores data under frozenset
+    composite keys — there is no synchronous node_id -> output lookup.
+    All async methods (.get, .get_cache) must not be called from sync code.
+
+    We return None here so that all resolution falls through to the pure
+    prompt-graph walk, which works correctly without any cache access.
+    """
+    return None
 
 
 class Capture:
     @classmethod
-    def get_inputs(cls):
+    async def get_inputs(cls):
+        """
+        Collect all capturable field values from the current prompt graph.
+
+        Uses await get_input_data() per node — exactly like the original code —
+        so that fully-resolved values (including wildcard-expanded text, LoRA
+        trigger words, etc.) are available even when ComfyUI's execution cache
+        is async (HierarchicalCache, ComfyUI 0.3.68+).
+
+        The node's execute() method must also be async (see node.py) so that
+        this coroutine can be awaited from the top-level save call.
+        """
+        from execution import get_input_data
+        from comfy_execution.graph import DynamicPrompt
+
+        _clear_resolved_texts()
+        # Reset save-node id so it gets re-detected for every generation.
+        # (Replaces the old pre_get_input_data hook which no longer fires.)
+        hook.current_save_image_node_id = -1
         inputs = {}
         prompt = hook.current_prompt
+        if not prompt:
+            return inputs
+
         extra_data = hook.current_extra_data
 
+        # Pass the raw cache object directly to get_input_data — it knows how
+        # to use HierarchicalCache (async) natively. OutputCacheCompat is only
+        # used by our own sync graph-walking helpers (validate, selector, etc.).
+        raw_outputs = None
+        outputs = None   # sync-safe compat wrapper for validate/selector calls
         if hook.prompt_executer and hook.prompt_executer.caches:
             raw_outputs = hook.prompt_executer.caches.outputs
+            # OutputCacheCompat for sync helpers only — NOT passed to get_input_data
             outputs = (
                 raw_outputs
                 if hasattr(raw_outputs, "get_output_cache")
                 else OutputCacheCompat(raw_outputs)
             )
-        else:
-            outputs = None
+
+        # ── Bulk-populate _resolved_node_texts from HierarchicalCache ──────────
+        # cache.get(node_id) returns a CacheEntry with .outputs — scan every
+        # node now so _resolve_text_from_graph can find runtime values.
+        if raw_outputs is not None:
+            _gc = getattr(raw_outputs, "get", None)
+            if _gc:
+                for _nid in list(prompt.keys()):
+                    try:
+                        _cr = _gc(str(_nid))
+                        if asyncio.iscoroutine(_cr):
+                            _cr = await _cr
+                        if _cr is None:
+                            continue
+                        _entry_outputs = getattr(_cr, "outputs", None)
+                        if not isinstance(_entry_outputs, (list, tuple)):
+                            continue
+                        for _si, _sv in enumerate(_entry_outputs):
+                            if isinstance(_sv, list) and len(_sv) == 1:
+                                _sv = _sv[0]
+                            if isinstance(_sv, str) and _sv.strip():
+                                _resolved_node_texts[f"{_nid}:{_si}"] = _sv
+                                if str(_nid) not in _resolved_node_texts:
+                                    _resolved_node_texts[str(_nid)] = _sv
+                    except Exception:
+                        pass
 
         for node_id, obj in prompt.items():
             class_type = obj["class_type"]
+            if class_type not in NODE_CLASS_MAPPINGS:
+                continue
             obj_class = NODE_CLASS_MAPPINGS[class_type]
-            node_inputs = obj["inputs"]
+            node_inputs = obj.get("inputs", {})
 
-            input_data = get_input_data(
-                node_inputs, obj_class, node_id, outputs, DynamicPrompt(prompt), extra_data
-            )
+            # Restore current_save_image_node_id — replaces the old
+            # pre_get_input_data hook which no longer fires on async ComfyUI.
+            from .nodes.node import SaveImageWithMetaData as _SaveNode
+            if obj_class == _SaveNode and hook.current_save_image_node_id == -1:
+                hook.current_save_image_node_id = node_id
 
-            # Process field data mappings for the captured inputs
+            # get_input_data is async in ComfyUI 0.3.68+ — await it.
+            try:
+                import inspect
+                # execution_list is the caches object in new ComfyUI.
+                # Try caches first, then None, then raw_outputs (old ComfyUI).
+                _caches = getattr(hook.prompt_executer, "caches", None)
+                for _exec_arg in (_caches, None, raw_outputs):
+                    try:
+                        input_data = get_input_data(
+                            node_inputs, obj_class, node_id, _exec_arg,
+                            DynamicPrompt(prompt), extra_data
+                        )
+                        if asyncio.iscoroutine(input_data) or hasattr(input_data, "__await__"):
+                            input_data = await input_data
+                        # Check if we got a real resolved value for linked inputs
+                        _dbg = input_data[0] if isinstance(input_data, (list,tuple)) and input_data else {}
+                        _has_real = any(
+                            v is not None and not (isinstance(v, tuple) and v == (None,))
+                            for v in _dbg.values()
+                        )
+                        if _has_real:
+                            break
+                    except Exception:
+                        input_data = [{}]
+            except Exception:
+                input_data = [{}]
+
+            # For CLIPTextEncode with a linked text input, resolve via cache.get(node_id)
+            # HierarchicalCache.get(node_id) returns a CacheEntry with .outputs list.
+            if class_type == "CLIPTextEncode" and raw_outputs is not None:
+                _dbg = input_data[0] if isinstance(input_data, (list,tuple)) and input_data else {}
+                _txt = _dbg.get("text")
+                _txt_missing = (_txt is None or _txt == (None,)
+                                or (isinstance(_txt, (list,tuple)) and len(_txt) == 1 and _txt[0] is None))
+                if _txt_missing:
+                    _link = node_inputs.get("text")
+                    if _is_link(_link):
+                        _src_nid = str(_link[0])
+                        _src_slot = int(_link[1])
+                        try:
+                            _gc = getattr(raw_outputs, "get", None)
+                            if _gc:
+                                _cr = _gc(_src_nid)
+                                if asyncio.iscoroutine(_cr):
+                                    _cr = await _cr
+                                if _cr is not None:
+                                    _src_outputs = getattr(_cr, "outputs", None)
+                                    if isinstance(_src_outputs, (list, tuple)) and len(_src_outputs) > _src_slot:
+                                        _slot = _src_outputs[_src_slot]
+                                        if isinstance(_slot, list) and len(_slot) == 1:
+                                            _slot = _slot[0]
+                                        if isinstance(_slot, str) and _slot.strip():
+                                            _resolved_node_texts[str(node_id)] = _slot
+                        except Exception:
+                            pass
+
+            # ── Store resolved text + probe async cache for this node ─────────
+            _rid = str(node_id)
+
+            # Scan CacheEntry objects that DO have ui.meta.node_id (display nodes).
+            # Pure compute nodes (CLIPTextEncode etc.) have ui=None so we can't
+            # identify them by cache key — we rely on get_input_data instead.
+            if raw_outputs is not None and not _resolved_node_texts.get("__cache_scanned__"):
+                _resolved_node_texts["__cache_scanned__"] = "1"
+                _cache_dict = getattr(raw_outputs, "cache", {})
+                for _entry in _cache_dict.values():
+                    try:
+                        _ui = getattr(_entry, "ui", None)
+                        if not isinstance(_ui, dict):
+                            continue
+                        _entry_nid = str(_ui.get("meta", {}).get("node_id", "") or "")
+                        if not _entry_nid:
+                            continue
+                        _entry_outputs = getattr(_entry, "outputs", None)
+                        if not isinstance(_entry_outputs, (list, tuple)):
+                            continue
+                        for _si, _sv in enumerate(_entry_outputs):
+                            if isinstance(_sv, list) and len(_sv) == 1:
+                                _sv = _sv[0]
+                            if isinstance(_sv, str) and _sv.strip():
+                                _resolved_node_texts[f"{_entry_nid}:{_si}"] = _sv
+                                if _entry_nid not in _resolved_node_texts:
+                                    _resolved_node_texts[_entry_nid] = _sv
+                    except Exception:
+                        pass
+
+            # Fall back to get_input_data result for text fields
+            if isinstance(input_data, (list, tuple)) and input_data:
+                _rd = input_data[0] if isinstance(input_data[0], dict) else {}
+                for _tkey in ("text", "string", "value", "prompt",
+                              "positive_prompt", "negative_prompt"):
+                    _tv = _rd.get(_tkey)
+                    if isinstance(_tv, list) and _tv:
+                        _tv = _tv[0]
+                    if isinstance(_tv, str) and _tv.strip():
+                        if _rid not in _resolved_node_texts:
+                            _resolved_node_texts[_rid] = _tv
+                        break
+
             for node_class, metas in CAPTURE_FIELD_LIST.items():
                 if class_type != node_class:
                     continue
 
                 for meta, field_data in metas.items():
-                    # Skip invalidated nodes
                     if field_data.get("validate") and not field_data["validate"](
                         node_id, obj, prompt, extra_data, outputs, input_data
                     ):
                         continue
 
-                    # Initialize list for meta if not exists
                     if meta not in inputs:
                         inputs[meta] = []
 
-                    # Get field value or selector
                     value = field_data.get("value")
                     if value is not None:
                         inputs[meta].append((node_id, value))
@@ -90,23 +633,39 @@ class Capture:
 
                     selector = field_data.get("selector")
                     if selector:
-                        v = selector(node_id, obj, prompt, extra_data, outputs, input_data)
+                        try:
+                            v = selector(node_id, obj, prompt, extra_data, outputs, input_data)
+                        except Exception:
+                            v = None
                         cls._append_value(inputs, meta, node_id, v)
                         continue
 
-                    # Fetch and process value from field_name
-                    field_name = field_data["field_name"]
-                    value = input_data[0].get(field_name)
-                    if value is not None:
-                        format_func = field_data.get("format")
-                        v = cls._apply_formatting(value, input_data, format_func)
-                        cls._append_value(inputs, meta, node_id, v)
+                    field_name = field_data.get("field_name")
+                    if not field_name:
+                        continue
+
+                    value = input_data[0].get(field_name) if isinstance(input_data, (list, tuple)) and input_data else None
+                    if value is None:
+                        continue
+
+                    # If get_input_data returned a raw link instead of a resolved
+                    # string (shouldn't happen with async await, but be safe)
+                    if _is_link(value):
+                        value = _resolve_text_from_graph(
+                            value, prompt, _get_outputs_cache()
+                        )
+                    if value is None:
+                        continue
+
+                    format_func = field_data.get("format")
+                    v = cls._apply_formatting(value, input_data, format_func)
+                    cls._append_value(inputs, meta, node_id, v)
 
         return inputs
 
+
     @staticmethod
     def _apply_formatting(value, input_data, format_func):
-        """Apply formatting to a value using the given format function."""
         if isinstance(value, list) and len(value) > 0:
             value = value[0]
         if format_func:
@@ -115,7 +674,6 @@ class Capture:
 
     @staticmethod
     def _append_value(inputs, meta, node_id, value):
-        """Append processed value to the inputs list."""
         if isinstance(value, list):
             for x in value:
                 inputs[meta].append((node_id, x))
@@ -128,7 +686,6 @@ class Capture:
         def clean_name(n):
             return os.path.splitext(os.path.basename(n))[0].replace('\\', '_').replace('/', '_').replace(' ', '_').replace(':', '_')
 
-        # Regex to match <lora:name:weight>, based on https://github.com/civitai/civitai/blob/main/src/utils/prompt-helpers.ts
         lora_assertion_re = re.compile(r"<(lora|lyco):([a-zA-Z0-9_\./\\-]+):([0-9.]+)>")
 
         prompt_texts = [
@@ -143,24 +700,20 @@ class Capture:
         lora_weights = inputs_before_sampler_node.get(MetaField.LORA_STRENGTH_MODEL, [])
         lora_hashes = inputs_before_sampler_node.get(MetaField.LORA_MODEL_HASH, [])
 
-        # Parse LoRAs in prompt
         lora_names_from_prompt, lora_weights_from_prompt, lora_hashes_from_prompt = [], [], []
         if "<lora:" in prompt_joined:
             for text in prompt_texts:
                 for _, name, weight in re.findall(lora_assertion_re, text.replace("\n", " ").replace("\r", " ")):
                     lora_names_from_prompt.append(("prompt_parse", name))
                     lora_weights_from_prompt.append(("prompt_parse", float(weight)))
-
                     h = calc_lora_hash(name)
                     if h:
                         lora_hashes_from_prompt.append(("prompt_parse", h))
 
-        # Combine all sources
         all_names = lora_names + lora_names_from_prompt
         all_weights = lora_weights + lora_weights_from_prompt
         all_hashes = lora_hashes + lora_hashes_from_prompt
 
-        # Update the metadata fields with combined information
         inputs_before_sampler_node[MetaField.LORA_MODEL_NAME] = all_names
         inputs_before_sampler_node[MetaField.LORA_STRENGTH_MODEL] = all_weights
         inputs_before_sampler_node[MetaField.LORA_MODEL_HASH] = all_hashes
@@ -178,12 +731,10 @@ class Capture:
         for (hsh, weight), names in grouped.items():
             canonical = min(names, key=len)
             present = hsh.lower() in hashes_in_prompt
-
             if not present:
                 lora_strings.append(f"<lora:{canonical}:{weight}>")
             lora_hashes_list.append(f"{canonical}: {hsh}")
 
-        # Rewrite prompt with cleaned names
         updated_prompts = []
         if "<lora:" in prompt_joined:
             for text in prompt_texts:
@@ -198,73 +749,94 @@ class Capture:
         return lora_strings, lora_hashes_string, updated_prompts
 
     @classmethod
-    def gen_pnginfo_dict(cls, inputs_before_sampler_node, inputs_before_this_node, prompt, save_civitai_sampler=True):
+    def gen_pnginfo_dict(cls, inputs_before_sampler_node, inputs_before_this_node, prompt, save_civitai_sampler=True, batch_index=0):
         pnginfo = {}
 
         if not inputs_before_sampler_node:
             inputs_before_sampler_node = defaultdict(list)
             cls._collect_all_metadata(prompt, inputs_before_sampler_node)
 
+        # ── PATCH: resolve prompts from graph when capture missed them ───────
+        outputs = _get_outputs_cache()
+
+        current_positive = None
+        current_negative = None
+        pos_list = inputs_before_sampler_node.get(MetaField.POSITIVE_PROMPT, [])
+        neg_list = inputs_before_sampler_node.get(MetaField.NEGATIVE_PROMPT, [])
+        if pos_list:
+            current_positive = pos_list[0][1] if len(pos_list[0]) > 1 else None
+        if neg_list:
+            current_negative = neg_list[0][1] if len(neg_list[0]) > 1 else None
+
+        # If either prompt is missing or is just a link reference, re-resolve
+        if (not current_positive or _is_link(current_positive) or
+                not current_negative or _is_link(current_negative)):
+            graph_pos, graph_neg = _find_prompt_texts(prompt, outputs, batch_index=batch_index)
+            if graph_pos and (not current_positive or _is_link(current_positive)):
+                inputs_before_sampler_node[MetaField.POSITIVE_PROMPT] = [("graph", graph_pos)]
+            if graph_neg and (not current_negative or _is_link(current_negative)):
+                inputs_before_sampler_node[MetaField.NEGATIVE_PROMPT] = [("graph", graph_neg)]
+        # ─────────────────────────────────────────────────────────────────────
+
         def is_simple(value):
             return isinstance(value, (str, int, float, bool)) or value is None
-        
+
         def extract(meta_key, label, source=inputs_before_sampler_node):
-            """
-            Scan the list behind `meta_key` and return the first payload that:
-              1) is present (link has at least two elements),
-              2) is not None,
-              3) if it's a string, the string is not empty.
-            Once found, it stores the value in `pnginfo[label]` and exits early.
-            """
-            # Retrieve the list associated with `meta_key`; default to an empty list
             val_list = source.get(meta_key, [])
-            # Traverse the list in the original order (front to back)
             for link in val_list:
-                # Guard against malformed link entries with length < 2
                 if len(link) <= 1:
                     continue
                 candidate = link[1]
-                # Skip if None
                 if candidate is None:
                     continue
-                # If candidate is a string, skip empty ones
                 if isinstance(candidate, str):
                     if not candidate.strip():
                         continue
                 elif not is_simple(candidate):
-                    continue # Skip lists, dicts, etc.
-
+                    continue
                 value = str(candidate)
                 pnginfo[label] = value
                 return value
-
-            # No valid payload found
             return None
 
-        # Prompts
         positive = extract(MetaField.POSITIVE_PROMPT, "Positive prompt") or ""
         if not positive.strip():
             print_warning("Positive prompt is empty!")
 
         negative = extract(MetaField.NEGATIVE_PROMPT, "Negative prompt") or ""
         lora_strings, lora_hashes, updated_prompts = cls.get_lora_strings_and_hashes(inputs_before_sampler_node)
-        
-        # If there are LoRAs in the prompt, use the cleaned version of the prompt.
+
         if updated_prompts:
             positive = updated_prompts[0]
-            
-        # Append LoRA models to the positive prompt, which is required for the Civitai website to parse and apply LoRA weights.
-        # Format: <lora:Lora_Model_Name:weight_value>. Example: <lora:Lora_Name_00:0.6> <lora:Lora_Name_01:0.8>
+
         if lora_strings:
             positive += " " + " ".join(lora_strings)
 
         pnginfo["Positive prompt"] = positive.strip()
         pnginfo["Negative prompt"] = negative.strip()
 
-        # Sampling params
         if not extract(MetaField.STEPS, "Steps"):
-            print_warning("Steps are empty, full metadata won't be added!")
-            return {}  # No sense in pnginfo without the Steps parameter, ref https://github.com/civitai/civitai/blob/7c8f3f3044218cf3b3d86bd9f49d12fc196ea1f6/src/utils/metadata/automatic.metadata.ts#L102C42-L102C47
+            # Fallback: read critical sampler fields directly from the prompt graph.
+            # This handles the case where Trace found the sampler but CAPTURE_FIELD_LIST
+            # didn't capture the fields (e.g. second run, async timing issue).
+            for _nid, _node in prompt.items():
+                _ni = _node.get("inputs", {})
+                if "steps" in _ni and "sampler_name" in _ni and "cfg" in _ni:
+                    if isinstance(_ni.get("steps"), (int, float)):
+                        inputs_before_sampler_node[MetaField.STEPS] = [(_nid, _ni["steps"])]
+                        if not inputs_before_sampler_node.get(MetaField.SAMPLER_NAME):
+                            inputs_before_sampler_node[MetaField.SAMPLER_NAME] = [(_nid, _ni["sampler_name"])]
+                        if not inputs_before_sampler_node.get(MetaField.SCHEDULER):
+                            inputs_before_sampler_node[MetaField.SCHEDULER] = [(_nid, _ni.get("scheduler", "normal"))]
+                        if not inputs_before_sampler_node.get(MetaField.CFG):
+                            inputs_before_sampler_node[MetaField.CFG] = [(_nid, _ni["cfg"])]
+                        _seed = _ni.get("seed")
+                        if not inputs_before_sampler_node.get(MetaField.SEED) and not _is_link(_seed):
+                            inputs_before_sampler_node[MetaField.SEED] = [(_nid, _seed)]
+                        break
+            if not extract(MetaField.STEPS, "Steps"):
+                print_warning("Steps are empty, full metadata won't be added!")
+                return {}
 
         samplers = inputs_before_sampler_node.get(MetaField.SAMPLER_NAME)
         schedulers = inputs_before_sampler_node.get(MetaField.SCHEDULER)
@@ -279,13 +851,11 @@ class Capture:
 
         extract(MetaField.CFG, "CFG scale")
         extract(MetaField.SEED, "Seed")
-        
-        # Missing CLIP skip means it was set to 1 (the default)
+
         clip_skip = extract(MetaField.CLIP_SKIP, "Clip skip")
         if clip_skip is None:
             pnginfo["Clip skip"] = "1"
 
-        # Image size
         image_width_data = inputs_before_sampler_node.get(MetaField.IMAGE_WIDTH, [[None]])
         image_height_data = inputs_before_sampler_node.get(MetaField.IMAGE_HEIGHT, [[None]])
 
@@ -297,31 +867,25 @@ class Capture:
         if width and height:
             pnginfo["Size"] = f"{width}x{height}"
 
-        # Model details
         extract(MetaField.MODEL_NAME, "Model")
         extract(MetaField.MODEL_HASH, "Model hash")
         extract(MetaField.VAE_NAME, "VAE", inputs_before_this_node)
         extract(MetaField.VAE_HASH, "VAE hash", inputs_before_this_node)
 
-        # Denoising strength
         denoise = inputs_before_sampler_node.get(MetaField.DENOISE)
         dval = denoise[0][1] if denoise else None
         if dval and 0 < float(dval) < 1:
             pnginfo["Denoising strength"] = float(dval)
 
-        # Include upscale info if present
         if inputs_before_this_node.get(MetaField.UPSCALE_BY) or inputs_before_this_node.get(MetaField.UPSCALE_MODEL_NAME):
             pnginfo["Denoising strength"] = float(dval or 1.0)
 
-        # Hi-Res, based on https://github.com/civitai/civitai/blob/0c6a61b2d3ee341e77a357d4c08cf220e22b1190/src/server/common/model-helpers.ts#L33
         extract(MetaField.UPSCALE_BY, "Hires upscale", inputs_before_this_node)
         extract(MetaField.UPSCALE_MODEL_NAME, "Hires upscaler", inputs_before_this_node)
 
-        # Lora hashes, based on https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/82a973c04367123ae98bd9abdf80d9eda9b910e2/extensions-builtin/Lora/scripts/lora_script.py#L78
         if lora_hashes:
             pnginfo["Lora hashes"] = f'"{lora_hashes}"'
 
-        # Additional metadata
         pnginfo.update(cls.gen_loras(inputs_before_sampler_node))
         pnginfo.update(cls.gen_embeddings(inputs_before_sampler_node))
 
@@ -333,11 +897,13 @@ class Capture:
 
     @classmethod
     def _collect_all_metadata(cls, prompt, result_dict):
+        # ── PATCH: use the graph-walk resolver for prompt texts ───────────────
+        outputs = _get_outputs_cache()
+
         def _append_metadata(meta, node_id, value):
             if value is not None:
                 result_dict[meta].append((node_id, value, 0))
 
-        # Detect nodes with specific fields
         resolved = {
             "prompt": Trace.find_node_with_fields(prompt, {"positive", "negative"}),
             "denoise": Trace.find_node_with_fields(prompt, {"denoise"}),
@@ -346,7 +912,6 @@ class Capture:
             "model": Trace.find_node_with_fields(prompt, {"ckpt_name"}),
         }
 
-        # LoRA metadata (multiple)
         for node_id, node in Trace.find_all_nodes_with_fields(prompt, {"lora_name", "strength_model"}):
             if node is not None:
                 inputs = node.get("inputs", {})
@@ -356,7 +921,6 @@ class Capture:
                 _append_metadata(MetaField.LORA_MODEL_HASH, node_id, calc_lora_hash(name) if name else None)
                 _append_metadata(MetaField.LORA_STRENGTH_MODEL, node_id, strength)
 
-        # Model metadata
         model_node = resolved.get("model")
         if model_node and model_node[1] is not None:
             node_id, node = model_node
@@ -365,14 +929,12 @@ class Capture:
             _append_metadata(MetaField.MODEL_NAME, node_id, name)
             _append_metadata(MetaField.MODEL_HASH, node_id, calc_model_hash(name) if name else None)
 
-        # Denoise
         denoise_node = resolved.get("denoise")
         if denoise_node and denoise_node[1] is not None:
             node_id, node = denoise_node
             val = node.get("inputs", {}).get("denoise")
             _append_metadata(MetaField.DENOISE, node_id, val)
 
-        # Sampler fields
         sampler_node = resolved.get("sampler")
         if sampler_node and sampler_node[1] is not None:
             node_id, node = sampler_node
@@ -385,8 +947,53 @@ class Capture:
                 "cfg": MetaField.CFG,
             }.items():
                 _append_metadata(meta, node_id, inputs.get(key))
+        else:
+            # ── SamplerCustomAdvanced topology ────────────────────────────────
+            # Find any node that links to a GUIDER (cfg_guider input) and
+            # has NOISE / SIGMAS / SAMPLER links — that is the top-level sampler.
+            # Then trace its sub-nodes to gather seed, steps, cfg, sampler_name.
+            for nid, node in prompt.items():
+                ni = node.get("inputs", {})
+                if not (_is_link(ni.get("cfg_guider")) or _is_link(ni.get("guider"))):
+                    continue
+                # Found a SamplerCustomAdvanced-style node
+                # Seed: follow noise link -> RandomNoise node
+                noise_link = ni.get("noise")
+                if _is_link(noise_link):
+                    noise_node = prompt.get(str(noise_link[0]))
+                    if noise_node:
+                        seed = noise_node.get("inputs", {}).get("noise_seed")                                or noise_node.get("inputs", {}).get("seed")
+                        _append_metadata(MetaField.SEED, str(noise_link[0]), seed)
+                # Steps + scheduler: follow sigmas link -> BasicScheduler etc.
+                sigmas_link = ni.get("sigmas")
+                if _is_link(sigmas_link):
+                    sig_node = prompt.get(str(sigmas_link[0]))
+                    if sig_node:
+                        sig_in = sig_node.get("inputs", {})
+                        _append_metadata(MetaField.STEPS, str(sigmas_link[0]),
+                                         sig_in.get("steps"))
+                        _append_metadata(MetaField.SCHEDULER, str(sigmas_link[0]),
+                                         sig_in.get("scheduler"))
+                        _append_metadata(MetaField.DENOISE, str(sigmas_link[0]),
+                                         sig_in.get("denoise"))
+                # Sampler name: follow sampler link -> KSamplerSelect etc.
+                sampler_link = ni.get("sampler")
+                if _is_link(sampler_link):
+                    samp_node = prompt.get(str(sampler_link[0]))
+                    if samp_node:
+                        samp_in = samp_node.get("inputs", {})
+                        _append_metadata(MetaField.SAMPLER_NAME, str(sampler_link[0]),
+                                         samp_in.get("sampler_name"))
+                # CFG: follow cfg_guider link -> CFGGuider etc.
+                guider_link = ni.get("cfg_guider") or ni.get("guider")
+                if _is_link(guider_link):
+                    g_node = prompt.get(str(guider_link[0]))
+                    if g_node:
+                        g_in = g_node.get("inputs", {})
+                        _append_metadata(MetaField.CFG, str(guider_link[0]),
+                                         g_in.get("cfg"))
+                break  # Only process the first SamplerCustomAdvanced-style node
 
-        # Image size fields
         size_node = resolved.get("size")
         if size_node and size_node[1] is not None:
             node_id, node = size_node
@@ -397,40 +1004,58 @@ class Capture:
             }.items():
                 _append_metadata(meta, node_id, inputs.get(key))
 
-        # Prompt fields
-        for node_id, node in Trace.find_all_nodes_with_fields(prompt, {"positive", "negative"}):
-            if node is not None:
+        # ── PATCHED prompt resolution ─────────────────────────────────────────
+        # Uses _find_prompt_texts which handles both classic KSampler topology
+        # (positive/negative on sampler) and SamplerCustomAdvanced topology
+        # (positive/negative on CFGGuider, linked via cfg_guider).
+        pos_text, neg_text = _find_prompt_texts(prompt, outputs, batch_index=0)
+        found_prompts = bool(pos_text or neg_text)
+        if pos_text:
+            _append_metadata(MetaField.POSITIVE_PROMPT, "graph", pos_text)
+        if neg_text:
+            _append_metadata(MetaField.NEGATIVE_PROMPT, "graph", neg_text)
+        for text in (pos_text, neg_text):
+            if not text:
+                continue
+            for emb_name, emb_hash in zip(
+                extract_embedding_names(text), extract_embedding_hashes(text)
+            ):
+                _append_metadata(MetaField.EMBEDDING_NAME, "graph", emb_name)
+                _append_metadata(MetaField.EMBEDDING_HASH, "graph", emb_hash)
+
+        # Final fallback – old behaviour preserved for edge-cases
+        if not found_prompts:
+            for node_id, node in Trace.find_all_nodes_with_fields(prompt, {"positive", "negative"}):
+                if node is None:
+                    continue
                 inputs = node.get("inputs", {})
                 pos_ref = inputs.get("positive", [None])[0]
                 neg_ref = inputs.get("negative", [None])[0]
 
                 def resolve_text(ref):
-                    if isinstance(ref, list): ref = ref[0]
-                    if not isinstance(ref, str): return None
-                    node = prompt.get(ref)
-                    return node.get("inputs", {}).get("text") if node else None
+                    if isinstance(ref, list):
+                        ref = ref[0]
+                    if not isinstance(ref, str):
+                        return None
+                    n = prompt.get(ref)
+                    if n is None:
+                        return None
+                    raw = n.get("inputs", {}).get("text")
+                    if isinstance(raw, str):
+                        return raw
+                    return _resolve_text_from_graph(raw, prompt, outputs)
 
                 pos_text = resolve_text(pos_ref)
                 neg_text = resolve_text(neg_ref)
-                
-                # Append positive and negative prompts
                 _append_metadata(MetaField.POSITIVE_PROMPT, pos_ref, pos_text)
                 _append_metadata(MetaField.NEGATIVE_PROMPT, neg_ref, neg_text)
 
-                # Add embedding metadata collection
-                if pos_text:
-                    embedding_names = extract_embedding_names(pos_text)
-                    embedding_hashes = extract_embedding_hashes(pos_text)
-                    for name, hash_ in zip(embedding_names, embedding_hashes):
+                for text in (pos_text, neg_text):
+                    if not text:
+                        continue
+                    for name, h in zip(extract_embedding_names(text), extract_embedding_hashes(text)):
                         _append_metadata(MetaField.EMBEDDING_NAME, node_id, name)
-                        _append_metadata(MetaField.EMBEDDING_HASH, node_id, hash_)
-
-                if neg_text:
-                    embedding_names = extract_embedding_names(neg_text)
-                    embedding_hashes = extract_embedding_hashes(neg_text)
-                    for name, hash_ in zip(embedding_names, embedding_hashes):
-                        _append_metadata(MetaField.EMBEDDING_NAME, node_id, name)
-                        _append_metadata(MetaField.EMBEDDING_HASH, node_id, hash_)
+                        _append_metadata(MetaField.EMBEDDING_HASH, node_id, h)
 
     @classmethod
     def extract_model_info(cls, inputs, meta_field_name, prefix):
@@ -506,7 +1131,7 @@ class Capture:
         vae = extract_single(inputs_before_this_node, MetaField.VAE_HASH)
         if vae:
             resource_hashes["vae"] = vae
-            
+
         upscaler_hash = extract_single(inputs_before_this_node, MetaField.UPSCALE_MODEL_HASH)
         if upscaler_hash:
             resource_hashes["upscaler"] = upscaler_hash
@@ -528,20 +1153,9 @@ class Capture:
     @classmethod
     def get_sampler_for_civitai(cls, sampler_names, schedulers):
         """
-        Get the pretty sampler name for Civitai in the form of `<Sampler Name> <Scheduler name>`.
-            - `dpmpp_2m` and `karras` will return `DPM++ 2M Karras`
-        
-        If there is a matching sampler name but no matching scheduler name, return only the matching sampler name.
-            - `dpmpp_2m` and `exponential` will return only `DPM++ 2M`
-
-        if there is no matching sampler and scheduler name, return `<sampler_name>_<scheduler_name>`
-            - `ipndm` and `normal` will return `ipndm`
-            - `ipndm` and `karras` will return `ipndm_karras`
-
+        Get the pretty sampler name for Civitai.
         Reference: https://github.com/civitai/civitai/blob/main/src/server/common/constants.ts
         """
-
-        # Sampler map: https://github.com/civitai/civitai/blob/fe76d9a4406d0c7b6f91f7640c50f0a8fa1b9f35/src/server/common/constants.ts#L699
         sampler_dict = {
             'euler': 'Euler',
             'euler_ancestral': 'Euler a',
@@ -552,13 +1166,11 @@ class Capture:
             'dpm_fast': 'DPM fast',
             'dpm_adaptive': 'DPM adaptive',
             'dpmpp_2s_ancestral': 'DPM++ 2S a',
-            
             'dpmpp_sde': 'DPM++ SDE',
             'dpmpp_sde_gpu': 'DPM++ SDE',
             'dpmpp_2m': 'DPM++ 2M',
             'dpmpp_2m_sde': 'DPM++ 2M SDE',
             'dpmpp_2m_sde_gpu': 'DPM++ 2M SDE',
-            
             'ddim': 'DDIM',
             'plms': 'PLMS',
             'uni_pc': 'UniPC',
@@ -568,15 +1180,11 @@ class Capture:
 
         sampler = None
         scheduler = None
-        
-        # Get the sampler and scheduler values
-        if sampler_names:
-            if len(sampler_names) > 0:
-                sampler = sampler_names[0][1]
-                
-        if schedulers:
-            if len(schedulers) > 0:
-                scheduler = schedulers[0][1]
+
+        if sampler_names and len(sampler_names) > 0:
+            sampler = sampler_names[0][1]
+        if schedulers and len(schedulers) > 0:
+            scheduler = schedulers[0][1]
 
         def get_scheduler_name(sampler_name, scheduler):
             if scheduler == "karras":
@@ -590,9 +1198,8 @@ class Capture:
 
         if not sampler:
             return None
-    
+
         if sampler in sampler_dict:
             return get_scheduler_name(sampler_dict[sampler], scheduler)
 
-        # If no match in the dictionary, return the sampler name with scheduler appended
         return get_scheduler_name(sampler, scheduler)
