@@ -4,6 +4,7 @@ A custom node for ComfyUI that automatically sends generated images to Telegram 
 
 Can be broken on latest versions
 
+
 ## ✨ Features
 
 - 🔐 **Secure token storage** - token is saved in config file, not in workflow
@@ -473,7 +474,10 @@ Pull requests are welcome! For major changes, please open an issue first to disc
 ## 🙏 Acknowledgments
 
 Based on <https://github.com/Sergey004/sd_telegram_sender>
-Based on a heavily modified <https://github.com/edelvarden/comfyui_image_metadata_extension> 
+
+Based on a heavily modified <https://github.com/edelvarden/comfyui_image_metadata_extension> + <https://github.com/Santodan/revived_comfyui_image_metadata_extension>
+
+
 
 
 ## 📞 Support
