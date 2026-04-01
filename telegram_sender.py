@@ -186,9 +186,44 @@ class TelegramSender:
                 pil_image = Image.fromarray(img_np)
                 
                 pnginfo_dict = {}
+                
+                # FIRST: Try to get seed directly from workflow (most reliable)
+                direct_seed = None
+                if prompt:
+                    try:
+                        for node_id, node in prompt.items():
+                            class_type = node.get("class_type", "")
+                            inputs = node.get("inputs", {})
+                            if "sampler" in class_type.lower() or "ksampler" in class_type.lower():
+                                # Try multiple seed field names
+                                seed = inputs.get("seed") or inputs.get("noise_seed") or inputs.get("seed_value")
+                                if seed is not None:
+                                    # Use the same normalization as _format_filename
+                                    normalized_seed = self._normalize_seed_value(seed)
+                                    if normalized_seed:
+                                        direct_seed = normalized_seed
+                                        if debug_metadata:
+                                            print(f"[Telegram Sender] DEBUG: Direct seed from {class_type}: {seed} → {direct_seed}")
+                                        break
+                    except Exception as e:
+                        if debug_metadata:
+                            print(f"[Telegram Sender] DEBUG: Direct seed extract error: {e}")
+                
+                # SECOND: Try to get metadata via TelegramMetadata
                 if enable_enhanced_metadata and prompt:
-                    try: pnginfo_dict = await TelegramMetadata.get_metadata(prompt)
-                    except: pass
+                    try: 
+                        pnginfo_dict = await TelegramMetadata.get_metadata(prompt)
+                        if debug_metadata:
+                            print(f"[Telegram Sender] DEBUG: pnginfo_dict = {pnginfo_dict}")
+                    except Exception as e:
+                        print(f"[Telegram Sender] ⚠️ Warning: Could not extract metadata: {e}")
+                        pnginfo_dict = {}
+                
+                # THIRD: If we got direct seed and pnginfo_dict is missing it, add it
+                if direct_seed is not None and not pnginfo_dict.get("Seed"):
+                    pnginfo_dict["Seed"] = direct_seed
+                    if debug_metadata:
+                        print(f"[Telegram Sender] DEBUG: Added direct seed to pnginfo_dict")
                 
                 formatted_filename = self._format_filename(filename_prefix.strip(), pnginfo_dict)
                 if not formatted_filename: formatted_filename = f"telegram_temp_{int(time.time())}_{i}"
@@ -457,17 +492,83 @@ class TelegramSender:
                 with open(file_path, 'rb') as f: os.fsync(f.fileno())
         except: pass
 
+    def _normalize_seed_value(self, seed_value):
+        """
+        Normalize seed value to ensure it's a clean integer or string.
+        Handles various formats: int, list [183, 0], string representations, etc.
+        Based on revived_comfyui_image_metadata_extension logic.
+        """
+        if seed_value is None:
+            return None
+        
+        # If it's a list or tuple, extract first element (like [183, 0])
+        if isinstance(seed_value, (list, tuple)):
+            if len(seed_value) > 0:
+                seed_value = seed_value[0]
+            else:
+                return None
+        
+        # Convert to string first to handle all cases
+        seed_str = str(seed_value).strip()
+        if not seed_str or seed_str == "None":
+            return None
+        
+        # Handle string representation of list: "[183, 0]" -> "183"
+        if seed_str.startswith("[") and seed_str.endswith("]"):
+            try:
+                # Parse the string list representation
+                parsed = eval(seed_str)  # Safe here since we control the format
+                if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
+                    seed_value = parsed[0]
+                    seed_str = str(seed_value).strip()
+                else:
+                    return None
+            except:
+                pass
+        
+        # Try to convert to integer for validation
+        try:
+            seed_int = int(float(seed_str))  # int(float()) handles "183.0" cases
+            return str(seed_int) if seed_int != 0 else None
+        except (ValueError, TypeError):
+            # If can't convert to int, return as string if it's not empty
+            return seed_str if seed_str else None
+
     def _format_filename(self, filename_template, pnginfo_dict):
         if "%" not in filename_template: return filename_template
+        
         now = datetime.now()
         date_table = {"yyyy": f"{now.year}", "MM": f"{now.month:02d}", "dd": f"{now.day:02d}", "hh": f"{now.hour:02d}", "mm": f"{now.minute:02d}", "ss": f"{now.second:02d}"}
         
-        seed = pnginfo_dict.get("Seed", pnginfo_dict.get("seed", ""))
-        model = pnginfo_dict.get("Model", pnginfo_dict.get("model", ""))
-        if model: model = os.path.splitext(os.path.basename(str(model)))[0]
+        # Extract seed - check multiple possible keys and normalize
+        seed = pnginfo_dict.get("Seed") or pnginfo_dict.get("seed") or ""
+        seed = self._normalize_seed_value(seed)
         
-        filename_template = filename_template.replace("%seed%", str(seed)).replace("%model%", str(model))
-        filename_template = filename_template.replace("%width%", str(pnginfo_dict.get("Width", ""))).replace("%height%", str(pnginfo_dict.get("Height", "")))
+        # Extract model - also handle lists
+        model = pnginfo_dict.get("Model") or pnginfo_dict.get("model") or ""
+        if isinstance(model, (list, tuple)) and len(model) > 0:
+            model = model[0]
+        model = str(model).strip() if model else ""
+        if model: 
+            model = os.path.splitext(os.path.basename(model))[0]
+        
+        # Only replace if value is not empty
+        if seed:
+            filename_template = filename_template.replace("%seed%", seed)
+        if model:
+            filename_template = filename_template.replace("%model%", model)
+        
+        # Width/height - also handle lists
+        width = pnginfo_dict.get("Width") or pnginfo_dict.get("width") or ""
+        if isinstance(width, (list, tuple)) and len(width) > 0:
+            width = width[0]
+        height = pnginfo_dict.get("Height") or pnginfo_dict.get("height") or ""
+        if isinstance(height, (list, tuple)) and len(height) > 0:
+            height = height[0]
+        if width:
+            filename_template = filename_template.replace("%width%", str(width))
+        if height:
+            filename_template = filename_template.replace("%height%", str(height))
         
         pattern_format = re.compile(r"(%[^%]+%)")
         segments = pattern_format.findall(filename_template)
@@ -480,11 +581,18 @@ class TelegramSender:
                 filename_template = filename_template.replace(segment, fmt)
             elif key in ["pprompt", "nprompt"]:
                 k_lookup = "Positive prompt" if key == "pprompt" else "Negative prompt"
-                txt = pnginfo_dict.get(k_lookup, pnginfo_dict.get(key, ""))
+                txt = pnginfo_dict.get(k_lookup) or pnginfo_dict.get(key) or ""
+                # Handle list case
+                if isinstance(txt, (list, tuple)) and len(txt) > 0:
+                    txt = txt[0]
                 length = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
                 if txt:
                     txt = str(txt).replace("\n", " ").replace("/", "")
                     filename_template = filename_template.replace(segment, txt[:length].strip() if length else txt.strip())
+            elif key not in ["seed", "model", "width", "height"]:
+                # Unknown placeholder - leave it as is
+                pass
+        
         return filename_template
 
 # Mappings
