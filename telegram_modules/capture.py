@@ -26,7 +26,6 @@ class OutputCacheCompat:
     def get_cache(self, node_id, unique_id=None): return None
 
 
-
 # ---------------------------------------------------------------------------
 # Runtime-resolved node text store.
 # Populated by Capture.get_inputs() after awaiting get_input_data() per node.
@@ -80,29 +79,47 @@ def _is_link(value):
         and isinstance(value[1], int)
     )
 
+def _resolve_primitive_link(value, prompt):
+    """
+    Follows node links to find primitive values (int, float, simple strings) 
+    for fields like Seed, Steps, CFG, Sampler_name, etc.
+    """
+    visited = set()
+    while _is_link(value):
+        src_id = str(value[0])
+        if src_id in visited:
+            break
+        visited.add(src_id)
+        src_node = prompt.get(src_id)
+        if not src_node:
+            break
+        src_inputs = src_node.get("inputs", {})
+        
+        resolved = False
+        # Look for common value keys used in primitives and value-routers
+        for k in ("value", "seed", "noise_seed", "seed_value", "int_value", "int", "float", "string", "text", "sampler_name", "scheduler", "steps", "cfg", "denoise", "width", "height"):
+            if k in src_inputs:
+                value = src_inputs[k]
+                resolved = True
+                break
+                
+        # If the linked node just passes it further via a general input, we stop loop or trace it next iteration.
+        if not resolved:
+            break
+            
+    # Handle single-element lists that are not links
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+        
+    # Clean up weird empty tuple outputs like (None,)
+    if isinstance(value, tuple) and len(value) > 0 and value[0] is None:
+        return None
+        
+    return value
 
 def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=0):
     """
     Recursively resolve *value* to a plain string by walking the prompt graph.
-
-    *value* can be:
-      - A plain string  → returned as-is.
-      - A link          → follow to the source node and recurse.
-      - None            → returns None.
-
-    *batch_index* selects which entry to use when a cache slot holds a list
-    of strings (i.e. when a list was fed into the node, generating one image
-    per entry).  Pass the current image's position in the batch so each image
-    gets its own prompt text rather than always the first one.
-
-    The function tries (in order):
-      1. The execution cache (already-evaluated output).
-      2. A ``text`` / ``string`` / similar field on the source node's inputs
-         (handles CLIPTextEncode with a wired-in text node).
-      3. Concatenation / joining nodes whose text inputs are all resolved
-         recursively and joined with the node's separator.
-
-    *_visited* prevents infinite loops on cyclic graphs.
     """
     if _visited is None:
         _visited = set()
@@ -128,14 +145,13 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
         return None
     _visited = _visited | {node_id}
 
-    # ── 1. Runtime interception cache (populated by HierarchicalCache.set patch) ────────
-    # Check slot-specific key first, then plain node_id key.
+    # ── 1. Runtime interception cache
     slot_key = f"{node_id}:{out_slot}"
     cached_text = _resolved_node_texts.get(slot_key) or _resolved_node_texts.get(node_id)
     if cached_text and isinstance(cached_text, str) and cached_text.strip():
         return cached_text
 
-    # ── 2. Walk the graph node ───────────────────────────────────────────────
+    # ── 2. Walk the graph node
     node = prompt.get(node_id)
     if node is None:
         return None
@@ -143,8 +159,6 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
     node_inputs = node.get("inputs", {})
     class_type = node.get("class_type", "").lower()
 
-    # Direct text field on this node (e.g. CLIPTextEncode whose "text" is
-    # a hard-coded string, or a primitive String node).
     for key in ("text", "string", "value", "val", "prompt",
                 "positive_prompt", "negative_prompt"):
         raw = node_inputs.get(key)
@@ -157,10 +171,9 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
             if resolved:
                 return resolved
 
-    # ── 3. Concatenation / joining nodes ────────────────────────────────────
+    # ── 3. Concatenation / joining nodes
     is_concat = any(hint in class_type for hint in _CONCAT_CLASS_HINTS)
     if is_concat:
-        # Collect all text-like input keys in stable order.
         candidate_keys = sorted(
             (k for k in node_inputs if any(h in k.lower() for h in _TEXT_KEY_HINTS)),
             key=lambda k: (re.sub(r'\d+', '', k),
@@ -177,10 +190,7 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
             sep = sep_raw.replace("\\n", "\n") if isinstance(sep_raw, str) else " "
             return sep.join(parts)
 
-    # ── 4. Known dynamic text-generator nodes ───────────────────────────────
-    # These nodes compute their output at execution time (wildcard expansion,
-    # random LoRA selection, etc.).  We fall back to their best static input
-    # as an approximation rather than returning nothing.
+    # ── 4. Known dynamic text-generator nodes
     for cls_hint, fallback_keys in _DYNAMIC_TEXT_NODES.items():
         if cls_hint in class_type:
             for fk in fallback_keys:
@@ -193,11 +203,9 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
                     resolved = _resolve_text_from_graph(raw, prompt, outputs, _visited, batch_index)
                     if resolved:
                         return resolved
-            break  # matched a dynamic node — don't fall through to generic scan
+            break
 
-    # ── 5. Fallback: scan only text-hinted input keys, never model/clip/vae ──
-    # IMPORTANT: skip nodes already matched as dynamic to prevent infinite loops
-    # where e.g. RandomLoraFolderModel.extra_trigger_words links back upstream.
+    # ── 5. Fallback: scan only text-hinted input keys, never model/clip/vae
     _NON_TEXT_KEYS = {"model", "clip", "vae", "control_net", "image", "mask",
                       "latent", "latent_image", "samples", "upscale_model",
                       "positive", "negative", "conditioning"}
@@ -207,7 +215,6 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
             if key.lower() in _NON_TEXT_KEYS:
                 continue
             if _is_link(raw):
-                # Only follow if the key name hints at text content
                 if any(h in key.lower() for h in _TEXT_KEY_HINTS):
                     resolved = _resolve_text_from_graph(raw, prompt, outputs, _visited, batch_index)
                     if resolved:
@@ -217,37 +224,21 @@ def _resolve_text_from_graph(value, prompt, outputs, _visited=None, batch_index=
 
 
 def _resolve_clip_text_encode_prompt(node_id, prompt, outputs, batch_index=0):
-    """
-    Given a CLIPTextEncode node's *node_id*, return its resolved text string.
-
-    The CLIPTextEncode node has a single ``text`` input which may be:
-      - A hard-coded string.
-      - A link to another node (primitive, text node, concat node, …).
-      - A list of strings when a list was wired in (one entry per batch image).
-    """
     nid = str(node_id)
-
-    # ── 1. Runtime-resolved text (populated by await get_input_data) ─────────
-    # This is the only reliable source when "text" is wired from a dynamic
-    # node (WildcardManager, StringConcatenate, etc.).
     cached_text = _resolved_node_texts.get(nid)
     if cached_text:
         return cached_text
 
-    # ── 2. Static graph walk (fallback for hardcoded text) ───────────────────
     node = prompt.get(nid)
     if node is None:
         return None
     raw = node.get("inputs", {}).get("text")
     if raw is None:
         return None
-    # Hard-coded string directly in the node
     if isinstance(raw, str):
         return raw if raw.strip() else None
-    # A link [node_id, output_index] — resolve through the graph
     if _is_link(raw):
         return _resolve_text_from_graph(raw, prompt, outputs, batch_index=batch_index)
-    # A genuine list of strings (one per batch entry) — NOT a link
     if isinstance(raw, list) and raw and all(isinstance(x, str) for x in raw):
         idx = min(batch_index, len(raw) - 1)
         return raw[idx] if raw[idx].strip() else None
@@ -255,14 +246,7 @@ def _resolve_clip_text_encode_prompt(node_id, prompt, outputs, batch_index=0):
 
 
 def _follow_conditioning_to_clip_text(cond_value, prompt, outputs, _depth=0, batch_index=0):
-    """
-    Follow a conditioning link chain until we reach a CLIPTextEncode and
-    resolve its text.
-
-    *batch_index* is forwarded all the way down so that when the text source
-    is a list (one string per batch image), the correct entry is selected.
-    """
-    if _depth > 20:  # safety limit
+    if _depth > 20: 
         return None
     if not _is_link(cond_value):
         return None
@@ -275,11 +259,9 @@ def _follow_conditioning_to_clip_text(cond_value, prompt, outputs, _depth=0, bat
     src_class = src_node.get("class_type", "")
     src_inputs = src_node.get("inputs", {})
 
-    # ── Direct CLIPTextEncode ─────────────────────────────────────────────
     if src_class == "CLIPTextEncode":
         return _resolve_clip_text_encode_prompt(src_id, prompt, outputs, batch_index)
 
-    # ── Node with its own text field (e.g. some conditioning wrappers) ───
     for k in ("text", "string", "prompt"):
         raw = src_inputs.get(k)
         if raw is not None:
@@ -287,7 +269,6 @@ def _follow_conditioning_to_clip_text(cond_value, prompt, outputs, _depth=0, bat
             if resolved:
                 return resolved
 
-    # ── Conditioning passthrough: follow the *first* conditioning input ──
     PASSTHROUGH_KEYS = ("conditioning", "cond", "conditioning_1", "conditioning_2")
     for k in PASSTHROUGH_KEYS:
         if k in src_inputs:
@@ -297,7 +278,6 @@ def _follow_conditioning_to_clip_text(cond_value, prompt, outputs, _depth=0, bat
             if result:
                 return result
 
-    # ── Last resort: any link-valued input that isn't a model/image slot ─
     _SKIP_KEYS = {"model", "clip", "vae", "image", "mask", "latent",
                   "latent_image", "samples", "positive", "negative"}
     for k, v in src_inputs.items():
@@ -312,11 +292,6 @@ def _follow_conditioning_to_clip_text(cond_value, prompt, outputs, _depth=0, bat
 
 
 def _find_guider_node_with_conditioning(node_id, prompt):
-    """
-    Given a node_id, follow cfg_guider/guider links to find a node that has
-    both 'positive' and 'negative' inputs (e.g. CFGGuider, BasicGuider).
-    Returns (node_id, node_dict) or (None, None).
-    """
     visited = set()
     queue = [str(node_id)]
     while queue:
@@ -328,10 +303,8 @@ def _find_guider_node_with_conditioning(node_id, prompt):
         if node is None:
             continue
         node_inputs = node.get("inputs", {})
-        # Found a node that has conditioning slots
         if "positive" in node_inputs or "negative" in node_inputs:
             return nid, node
-        # Follow guider-type links deeper
         for k in ("cfg_guider", "guider", "positive_guider", "negative_guider",
                   "conditioning", "cond"):
             v = node_inputs.get(k)
@@ -341,21 +314,6 @@ def _find_guider_node_with_conditioning(node_id, prompt):
 
 
 def _find_prompt_texts(prompt, outputs, batch_index=0):
-    """
-    Walk the prompt graph to find the positive and negative prompt strings.
-
-    Handles two major workflow topologies:
-
-    Classic KSampler topology:
-        KSampler(positive=COND, negative=COND, seed, steps, cfg, ...)
-
-    SamplerCustomAdvanced topology (used by Flux / res_multistep_simple etc.):
-        SamplerCustomAdvanced(noise=NOISE, cfg_guider=GUIDER, sampler=SAMPLER, sigmas=SIGMAS)
-        CFGGuider(model, positive=COND, negative=COND, cfg)
-
-    Both are detected and the conditioning chains are resolved independently
-    to avoid swapping positive / negative.
-    """
     SAMPLER_CLASSES = {
         "KSampler", "KSamplerAdvanced", "SamplerCustom",
         "KSamplerSelect", "KSampler_inspire",
@@ -363,17 +321,14 @@ def _find_prompt_texts(prompt, outputs, batch_index=0):
         "FluxKSampler", "FluxSampler",
         "SamplerCustomAdvanced",
     }
-    # Inputs that indicate this node is a sampler even if the class name is unknown
     SAMPLER_HINT_KEYS = {"seed", "steps", "cfg", "sampler_name", "noise_seed", "denoise",
                          "cfg_guider", "noise", "sigmas"}
-    # Nodes that hold conditioning but are NOT the sampler
     GUIDER_CLASSES = {"CFGGuider", "BasicGuider", "DualCFGGuider", "Guider"}
 
     for node_id, node in prompt.items():
         class_type = node.get("class_type", "")
         node_inputs = node.get("inputs", {})
 
-        # ── Path A: classic node with positive+negative directly ─────────────
         has_pos_neg = "positive" in node_inputs and "negative" in node_inputs
         is_classic_sampler = (
             class_type in SAMPLER_CLASSES
@@ -390,7 +345,6 @@ def _find_prompt_texts(prompt, outputs, batch_index=0):
             if pos_text or neg_text:
                 return pos_text, neg_text
 
-        # ── Path B: SamplerCustomAdvanced-style (cfg_guider link) ────────────
         if (class_type in SAMPLER_CLASSES
                 or bool(SAMPLER_HINT_KEYS & set(node_inputs.keys()))):
             for guider_key in ("cfg_guider", "guider"):
@@ -416,43 +370,17 @@ def _find_prompt_texts(prompt, outputs, batch_index=0):
     return None, None
 
 
-# ---------------------------------------------------------------------------
-# Main Capture class (original logic preserved, prompt resolution patched)
-# ---------------------------------------------------------------------------
-
-
 def _get_outputs_cache():
-    """
-    The new HierarchicalCache (ComfyUI 0.3.68+) stores data under frozenset
-    composite keys — there is no synchronous node_id -> output lookup.
-    All async methods (.get, .get_cache) must not be called from sync code.
-
-    We return None here so that all resolution falls through to the pure
-    prompt-graph walk, which works correctly without any cache access.
-    """
     return None
 
 
 class Capture:
     @classmethod
     async def get_inputs(cls):
-        """
-        Collect all capturable field values from the current prompt graph.
-
-        Uses await get_input_data() per node — exactly like the original code —
-        so that fully-resolved values (including wildcard-expanded text, LoRA
-        trigger words, etc.) are available even when ComfyUI's execution cache
-        is async (HierarchicalCache, ComfyUI 0.3.68+).
-
-        The node's execute() method must also be async (see node.py) so that
-        this coroutine can be awaited from the top-level save call.
-        """
         from execution import get_input_data
         from comfy_execution.graph import DynamicPrompt
 
         _clear_resolved_texts()
-        # Reset save-node id so it gets re-detected for every generation.
-        # (Replaces the old pre_get_input_data hook which no longer fires.)
         hook.current_save_image_node_id = -1
         inputs = {}
         prompt = hook.current_prompt
@@ -461,23 +389,16 @@ class Capture:
 
         extra_data = hook.current_extra_data
 
-        # Pass the raw cache object directly to get_input_data — it knows how
-        # to use HierarchicalCache (async) natively. OutputCacheCompat is only
-        # used by our own sync graph-walking helpers (validate, selector, etc.).
         raw_outputs = None
-        outputs = None   # sync-safe compat wrapper for validate/selector calls
+        outputs = None
         if hook.prompt_executer and hook.prompt_executer.caches:
             raw_outputs = hook.prompt_executer.caches.outputs
-            # OutputCacheCompat for sync helpers only — NOT passed to get_input_data
             outputs = (
                 raw_outputs
                 if hasattr(raw_outputs, "get_output_cache")
                 else OutputCacheCompat(raw_outputs)
             )
 
-        # ── Bulk-populate _resolved_node_texts from HierarchicalCache ──────────
-        # cache.get(node_id) returns a CacheEntry with .outputs — scan every
-        # node now so _resolve_text_from_graph can find runtime values.
         if raw_outputs is not None:
             _gc = getattr(raw_outputs, "get", None)
             if _gc:
@@ -508,17 +429,12 @@ class Capture:
             obj_class = NODE_CLASS_MAPPINGS[class_type]
             node_inputs = obj.get("inputs", {})
 
-            # Restore current_save_image_node_id — replaces the old
-            # pre_get_input_data hook which no longer fires on async ComfyUI.
             from .nodes.node import SaveImageWithMetaData as _SaveNode
             if obj_class == _SaveNode and hook.current_save_image_node_id == -1:
                 hook.current_save_image_node_id = node_id
 
-            # get_input_data is async in ComfyUI 0.3.68+ — await it.
             try:
                 import inspect
-                # execution_list is the caches object in new ComfyUI.
-                # Try caches first, then None, then raw_outputs (old ComfyUI).
                 _caches = getattr(hook.prompt_executer, "caches", None)
                 for _exec_arg in (_caches, None, raw_outputs):
                     try:
@@ -528,7 +444,6 @@ class Capture:
                         )
                         if asyncio.iscoroutine(input_data) or hasattr(input_data, "__await__"):
                             input_data = await input_data
-                        # Check if we got a real resolved value for linked inputs
                         _dbg = input_data[0] if isinstance(input_data, (list,tuple)) and input_data else {}
                         _has_real = any(
                             v is not None and not (isinstance(v, tuple) and v == (None,))
@@ -541,8 +456,6 @@ class Capture:
             except Exception:
                 input_data = [{}]
 
-            # For CLIPTextEncode with a linked text input, resolve via cache.get(node_id)
-            # HierarchicalCache.get(node_id) returns a CacheEntry with .outputs list.
             if class_type == "CLIPTextEncode" and raw_outputs is not None:
                 _dbg = input_data[0] if isinstance(input_data, (list,tuple)) and input_data else {}
                 _txt = _dbg.get("text")
@@ -570,12 +483,8 @@ class Capture:
                         except Exception:
                             pass
 
-            # ── Store resolved text + probe async cache for this node ─────────
             _rid = str(node_id)
 
-            # Scan CacheEntry objects that DO have ui.meta.node_id (display nodes).
-            # Pure compute nodes (CLIPTextEncode etc.) have ui=None so we can't
-            # identify them by cache key — we rely on get_input_data instead.
             if raw_outputs is not None and not _resolved_node_texts.get("__cache_scanned__"):
                 _resolved_node_texts["__cache_scanned__"] = "1"
                 _cache_dict = getattr(raw_outputs, "cache", {})
@@ -600,7 +509,6 @@ class Capture:
                     except Exception:
                         pass
 
-            # Fall back to get_input_data result for text fields
             if isinstance(input_data, (list, tuple)) and input_data:
                 _rd = input_data[0] if isinstance(input_data[0], dict) else {}
                 for _tkey in ("text", "string", "value", "prompt",
@@ -648,13 +556,13 @@ class Capture:
                     if value is None:
                         continue
 
-                    # If get_input_data returned a raw link instead of a resolved
-                    # string (shouldn't happen with async await, but be safe)
                     if _is_link(value):
-                        value = _resolve_text_from_graph(
-                            value, prompt, _get_outputs_cache()
-                        )
-                    if value is None:
+                        if meta in (MetaField.POSITIVE_PROMPT, MetaField.NEGATIVE_PROMPT):
+                            value = _resolve_text_from_graph(value, prompt, _get_outputs_cache())
+                        else:
+                            value = _resolve_primitive_link(value, prompt)
+                            
+                    if value is None or (isinstance(value, tuple) and value == (None,)):
                         continue
 
                     format_func = field_data.get("format")
@@ -756,7 +664,6 @@ class Capture:
             inputs_before_sampler_node = defaultdict(list)
             cls._collect_all_metadata(prompt, inputs_before_sampler_node)
 
-        # ── PATCH: resolve prompts from graph when capture missed them ───────
         outputs = _get_outputs_cache()
 
         current_positive = None
@@ -768,7 +675,6 @@ class Capture:
         if neg_list:
             current_negative = neg_list[0][1] if len(neg_list[0]) > 1 else None
 
-        # If either prompt is missing or is just a link reference, re-resolve
         if (not current_positive or _is_link(current_positive) or
                 not current_negative or _is_link(current_negative)):
             graph_pos, graph_neg = _find_prompt_texts(prompt, outputs, batch_index=batch_index)
@@ -776,7 +682,6 @@ class Capture:
                 inputs_before_sampler_node[MetaField.POSITIVE_PROMPT] = [("graph", graph_pos)]
             if graph_neg and (not current_negative or _is_link(current_negative)):
                 inputs_before_sampler_node[MetaField.NEGATIVE_PROMPT] = [("graph", graph_neg)]
-        # ─────────────────────────────────────────────────────────────────────
 
         def is_simple(value):
             return isinstance(value, (str, int, float, bool)) or value is None
@@ -816,22 +721,25 @@ class Capture:
         pnginfo["Negative prompt"] = negative.strip()
 
         if not extract(MetaField.STEPS, "Steps"):
-            # Fallback: read critical sampler fields directly from the prompt graph.
-            # This handles the case where Trace found the sampler but CAPTURE_FIELD_LIST
-            # didn't capture the fields (e.g. second run, async timing issue).
             for _nid, _node in prompt.items():
                 _ni = _node.get("inputs", {})
-                if "steps" in _ni and "sampler_name" in _ni and "cfg" in _ni:
-                    if isinstance(_ni.get("steps"), (int, float)):
-                        inputs_before_sampler_node[MetaField.STEPS] = [(_nid, _ni["steps"])]
+                
+                _steps = _resolve_primitive_link(_ni.get("steps"), prompt)
+                _cfg = _resolve_primitive_link(_ni.get("cfg"), prompt)
+                _sampler_name = _resolve_primitive_link(_ni.get("sampler_name"), prompt)
+                
+                if _steps is not None and _sampler_name is not None and _cfg is not None:
+                    if isinstance(_steps, (int, float, str)):
+                        inputs_before_sampler_node[MetaField.STEPS] = [(_nid, _steps)]
                         if not inputs_before_sampler_node.get(MetaField.SAMPLER_NAME):
-                            inputs_before_sampler_node[MetaField.SAMPLER_NAME] = [(_nid, _ni["sampler_name"])]
+                            inputs_before_sampler_node[MetaField.SAMPLER_NAME] = [(_nid, _sampler_name)]
                         if not inputs_before_sampler_node.get(MetaField.SCHEDULER):
-                            inputs_before_sampler_node[MetaField.SCHEDULER] = [(_nid, _ni.get("scheduler", "normal"))]
+                            inputs_before_sampler_node[MetaField.SCHEDULER] = [(_nid, _resolve_primitive_link(_ni.get("scheduler", "normal"), prompt))]
                         if not inputs_before_sampler_node.get(MetaField.CFG):
-                            inputs_before_sampler_node[MetaField.CFG] = [(_nid, _ni["cfg"])]
-                        _seed = _ni.get("seed")
-                        if not inputs_before_sampler_node.get(MetaField.SEED) and not _is_link(_seed):
+                            inputs_before_sampler_node[MetaField.CFG] = [(_nid, _cfg)]
+                        _seed = _ni.get("seed") or _ni.get("noise_seed")
+                        _seed = _resolve_primitive_link(_seed, prompt)
+                        if not inputs_before_sampler_node.get(MetaField.SEED) and _seed is not None:
                             inputs_before_sampler_node[MetaField.SEED] = [(_nid, _seed)]
                         break
             if not extract(MetaField.STEPS, "Steps"):
@@ -897,7 +805,6 @@ class Capture:
 
     @classmethod
     def _collect_all_metadata(cls, prompt, result_dict):
-        # ── PATCH: use the graph-walk resolver for prompt texts ───────────────
         outputs = _get_outputs_cache()
 
         def _append_metadata(meta, node_id, value):
@@ -932,7 +839,7 @@ class Capture:
         denoise_node = resolved.get("denoise")
         if denoise_node and denoise_node[1] is not None:
             node_id, node = denoise_node
-            val = node.get("inputs", {}).get("denoise")
+            val = _resolve_primitive_link(node.get("inputs", {}).get("denoise"), prompt)
             _append_metadata(MetaField.DENOISE, node_id, val)
 
         sampler_node = resolved.get("sampler")
@@ -946,53 +853,39 @@ class Capture:
                 "steps": MetaField.STEPS,
                 "cfg": MetaField.CFG,
             }.items():
-                _append_metadata(meta, node_id, inputs.get(key))
+                _append_metadata(meta, node_id, _resolve_primitive_link(inputs.get(key), prompt))
         else:
-            # ── SamplerCustomAdvanced topology ────────────────────────────────
-            # Find any node that links to a GUIDER (cfg_guider input) and
-            # has NOISE / SIGMAS / SAMPLER links — that is the top-level sampler.
-            # Then trace its sub-nodes to gather seed, steps, cfg, sampler_name.
             for nid, node in prompt.items():
                 ni = node.get("inputs", {})
                 if not (_is_link(ni.get("cfg_guider")) or _is_link(ni.get("guider"))):
                     continue
-                # Found a SamplerCustomAdvanced-style node
-                # Seed: follow noise link -> RandomNoise node
                 noise_link = ni.get("noise")
                 if _is_link(noise_link):
                     noise_node = prompt.get(str(noise_link[0]))
                     if noise_node:
-                        seed = noise_node.get("inputs", {}).get("noise_seed")                                or noise_node.get("inputs", {}).get("seed")
-                        _append_metadata(MetaField.SEED, str(noise_link[0]), seed)
-                # Steps + scheduler: follow sigmas link -> BasicScheduler etc.
+                        seed = noise_node.get("inputs", {}).get("noise_seed") or noise_node.get("inputs", {}).get("seed")
+                        _append_metadata(MetaField.SEED, str(noise_link[0]), _resolve_primitive_link(seed, prompt))
                 sigmas_link = ni.get("sigmas")
                 if _is_link(sigmas_link):
                     sig_node = prompt.get(str(sigmas_link[0]))
                     if sig_node:
                         sig_in = sig_node.get("inputs", {})
-                        _append_metadata(MetaField.STEPS, str(sigmas_link[0]),
-                                         sig_in.get("steps"))
-                        _append_metadata(MetaField.SCHEDULER, str(sigmas_link[0]),
-                                         sig_in.get("scheduler"))
-                        _append_metadata(MetaField.DENOISE, str(sigmas_link[0]),
-                                         sig_in.get("denoise"))
-                # Sampler name: follow sampler link -> KSamplerSelect etc.
+                        _append_metadata(MetaField.STEPS, str(sigmas_link[0]), _resolve_primitive_link(sig_in.get("steps"), prompt))
+                        _append_metadata(MetaField.SCHEDULER, str(sigmas_link[0]), _resolve_primitive_link(sig_in.get("scheduler"), prompt))
+                        _append_metadata(MetaField.DENOISE, str(sigmas_link[0]), _resolve_primitive_link(sig_in.get("denoise"), prompt))
                 sampler_link = ni.get("sampler")
                 if _is_link(sampler_link):
                     samp_node = prompt.get(str(sampler_link[0]))
                     if samp_node:
                         samp_in = samp_node.get("inputs", {})
-                        _append_metadata(MetaField.SAMPLER_NAME, str(sampler_link[0]),
-                                         samp_in.get("sampler_name"))
-                # CFG: follow cfg_guider link -> CFGGuider etc.
+                        _append_metadata(MetaField.SAMPLER_NAME, str(sampler_link[0]), _resolve_primitive_link(samp_in.get("sampler_name"), prompt))
                 guider_link = ni.get("cfg_guider") or ni.get("guider")
                 if _is_link(guider_link):
                     g_node = prompt.get(str(guider_link[0]))
                     if g_node:
                         g_in = g_node.get("inputs", {})
-                        _append_metadata(MetaField.CFG, str(guider_link[0]),
-                                         g_in.get("cfg"))
-                break  # Only process the first SamplerCustomAdvanced-style node
+                        _append_metadata(MetaField.CFG, str(guider_link[0]), _resolve_primitive_link(g_in.get("cfg"), prompt))
+                break
 
         size_node = resolved.get("size")
         if size_node and size_node[1] is not None:
@@ -1002,12 +895,8 @@ class Capture:
                 "width": MetaField.IMAGE_WIDTH,
                 "height": MetaField.IMAGE_HEIGHT,
             }.items():
-                _append_metadata(meta, node_id, inputs.get(key))
+                _append_metadata(meta, node_id, _resolve_primitive_link(inputs.get(key), prompt))
 
-        # ── PATCHED prompt resolution ─────────────────────────────────────────
-        # Uses _find_prompt_texts which handles both classic KSampler topology
-        # (positive/negative on sampler) and SamplerCustomAdvanced topology
-        # (positive/negative on CFGGuider, linked via cfg_guider).
         pos_text, neg_text = _find_prompt_texts(prompt, outputs, batch_index=0)
         found_prompts = bool(pos_text or neg_text)
         if pos_text:
@@ -1023,7 +912,6 @@ class Capture:
                 _append_metadata(MetaField.EMBEDDING_NAME, "graph", emb_name)
                 _append_metadata(MetaField.EMBEDDING_HASH, "graph", emb_hash)
 
-        # Final fallback – old behaviour preserved for edge-cases
         if not found_prompts:
             for node_id, node in Trace.find_all_nodes_with_fields(prompt, {"positive", "negative"}):
                 if node is None:
