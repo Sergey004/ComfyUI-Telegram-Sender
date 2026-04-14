@@ -354,18 +354,39 @@ def _fetch_versions_by_hash(hashes: List[str]) -> List[CivitVersion]:
     return []
 
 
-def _fetch_model_by_name(query: str, max_nsfw_level: int = 1) -> Optional[CivitModel]:
+def _fetch_model_and_version_by_name(
+    file_basename_key: str,
+) -> Optional[tuple]:
     """
-    Search for model by name query.
-    Returns first matching model or None.
+    Search for a model whose version files contain a file matching file_basename_key.
+
+    Iterates all items returned by the search and checks every version/file,
+    so we never accidentally pick a wrong model just because it ranked first.
+
+    Returns (CivitModel, CivitVersion) or None.
     """
-    raw_data = _make_request("/models", params={"query": query, "pageSize": 5})
-    
+    raw_data = _make_request("/models", params={"query": file_basename_key, "pageSize": 20})
     items = raw_data.get("items", []) if isinstance(raw_data, dict) else []
     if not items:
         return None
-    
-    return CivitModel.from_dict(items[0]) if items else None
+
+    for item in items:
+        model = CivitModel.from_dict(item)
+        for version in model.versions:
+            for f in version.files:
+                if _basename_key(f.name) == file_basename_key:
+                    return (model, version)
+
+    # Second pass: loose match on model name itself (handles cases where the
+    # file was renamed locally but still matches the model title).
+    for item in items:
+        model = CivitModel.from_dict(item)
+        if _basename_key(model.name) == file_basename_key:
+            # Return the first (latest) version if available
+            if model.versions:
+                return (model, model.versions[0])
+
+    return None
 
 
 def _fetch_by_name(
@@ -378,41 +399,35 @@ def _fetch_by_name(
     """
     updated_prev = 0
     updated_info = 0
-    
+
     for path in tqdm(list(paths), desc="Name lookup", unit="file"):
         name = _basename_key(path)
-        
+
         time.sleep(RATE_LIMIT_DELAY)
-        
-        model = _fetch_model_by_name(name, max_nsfw_level)
-        if not model:
+
+        try:
+            result = _fetch_model_and_version_by_name(name)
+        except CivitaiAPIError as e:
+            print_warning(f" Name lookup failed for {name}: {e.status_code}")
             continue
-        
-        best_version = None
-        best_image_url = None
-        
-        for version in model.versions:
-            for f in version.files:
-                if _basename_key(f.name) == name:
-                    best_version = version
-                    break
-            if best_version:
-                break
-        
-        if not best_version and model.versions:
-            best_version = model.versions[0]
-        
-        if best_version:
-            best_image_url = get_first_sfw_image_url(best_version.images, max_nsfw_level)
-        
+        except Exception as e:
+            print_warning(f" Name lookup error for {name}: {e}")
+            continue
+
+        if not result:
+            print_info(f" No match found for {name}, skipping")
+            continue
+
+        model, best_version = result
+        best_image_url = get_first_sfw_image_url(best_version.images, max_nsfw_level)
+
         if best_image_url:
             save_preview_for(path, best_image_url)
             updated_prev += 1
-        
-        if best_version or model:
-            save_info_for(path, best_version or model, model)
-            updated_info += 1
-    
+
+        save_info_for(path, best_version, model)
+        updated_info += 1
+
     return updated_prev, updated_info
 
 
@@ -599,7 +614,7 @@ def save_info_for(
         nsfw_level = version.nsfw_level
         
         if version.images:
-            preview_url = version.images[0].url
+            preview_url = get_first_sfw_image_url(version.images) or version.images[0].url
         
         if not desc and model:
             desc = _clean_html(model.description)
@@ -617,8 +632,9 @@ def save_info_for(
         allow_commercial = list(model.allow_commercial_use) if model.allow_commercial_use else []
         if not preview_url and model.versions:
             for v in model.versions:
-                if v.images:
-                    preview_url = v.images[0].url
+                url = get_first_sfw_image_url(v.images) if v.images else None
+                if url:
+                    preview_url = url
                     break
     
     try:
@@ -759,24 +775,28 @@ def fetch_missing(
     
     hashed_paths = {v["path"] for v in index.values()}
     unhashed = [p for p in all_paths if p not in hashed_paths and (not has_preview(p) or needs_info_update(p))]
-    
+
     if unhashed:
-        print_info(f" Fallback name-based matching for {len(unhashed)} files")
-        prev2, info2 = _fetch_by_name(unhashed, max_nsfw_level)
-        upd_previews += prev2
-        upd_info += info2
-    
-    still_missing = [p for p in all_paths if not has_preview(p) or needs_info_update(p)]
-    if still_missing:
-        print_info(f" Additional name-based lookup for {len(still_missing)} remaining files")
-        prev2, info2 = _fetch_by_name(still_missing, max_nsfw_level)
-        upd_previews += prev2
-        upd_info += info2
-    
+        print_info(f" Fallback name-based matching for {len(unhashed)} unhashed files")
+        try:
+            prev2, info2 = _fetch_by_name(unhashed, max_nsfw_level)
+            upd_previews += prev2
+            upd_info += info2
+        except Exception as e:
+            print_warning(f" Fallback name lookup failed: {e}")
+
+    # Only retry files that failed after hash lookup (e.g. description was empty)
     if fallback_paths:
-        prev2, info2 = _fetch_by_name(list(fallback_paths), max_nsfw_level)
-        upd_previews += prev2
-        upd_info += info2
+        # Exclude files already handled by unhashed pass
+        retry_paths = list(fallback_paths - set(unhashed))
+        if retry_paths:
+            print_info(f" Retry name-based lookup for {len(retry_paths)} files with incomplete info")
+            try:
+                prev2, info2 = _fetch_by_name(retry_paths, max_nsfw_level)
+                upd_previews += prev2
+                upd_info += info2
+            except Exception as e:
+                print_warning(f" Fallback paths lookup failed: {e}")
     
     result = {"previews_updated": upd_previews, "info_updated": upd_info}
     print_info(f" Finished: {result}")
