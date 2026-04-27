@@ -25,3 +25,6 @@ Thumbs.db
 test_*
 .cache
 .conf
+civitai_comfy_nodes/
+sdnext/
+civitai_comfy_nodes/
