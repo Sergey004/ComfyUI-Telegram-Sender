@@ -59,13 +59,28 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Channel ID for NSFW content",
     },
-    {
-        id: "Telegram.UnsortedChannelId",
-        name: "Unsorted Channel ID",
-        type: "string",
-        defaultValue: "",
-        tooltip: "Fallback channel for unrouted images",
-    },
+  {
+    id: "Telegram.UnsortedChannelId",
+    name: "Unsorted Channel ID",
+    type: "string",
+    defaultValue: "",
+    tooltip: "Fallback channel for unrouted images",
+  },
+  {
+    id: "Telegram.CivitaiApiKey",
+    name: "CivitAI API Key",
+    type: "string",
+    defaultValue: "",
+    tooltip: "Your CivitAI API key for downloading gated/private models and NSFW previews. Get it from https://civitai.com/user/account",
+  },
+  {
+    id: "Telegram.CivitaiNsfwLevel",
+    name: "CivitAI Max NSFW Level",
+    type: "combo",
+    options: ["PG", "PG-13", "R", "X", "XXX"],
+    defaultValue: "PG",
+    tooltip: "Maximum NSFW level for CivitAI preview images. PG=SFW only, XXX=allow all. Requires API key for NSFW content.",
+  },
 ];
 
 app.registerExtension({
@@ -110,9 +125,15 @@ app.registerExtension({
                     if (data.nsfw_channel_id) {
                         app.ui.settings.setSettingValue("Telegram.NSFWChannelId", data.nsfw_channel_id);
                     }
-                    if (data.unsorted_channel_id) {
-                        app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.unsorted_channel_id);
-                    }
+      if (data.unsorted_channel_id) {
+        app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.unsorted_channel_id);
+      }
+      if (data.civitai_api_key) {
+        app.ui.settings.setSettingValue("Telegram.CivitaiApiKey", data.civitai_api_key);
+      }
+      if (data.civitai_nsfw_level) {
+        app.ui.settings.setSettingValue("Telegram.CivitaiNsfwLevel", data.civitai_nsfw_level);
+      }
                     
                     console.log("[Telegram Sender] ✅ Settings migrated successfully!");
                     app.extensionManager.toast.add({

@@ -148,11 +148,13 @@ class TelegramSender:
                 if os.path.exists(path):
                     with open(path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        if not config.get("bot_token"): config["bot_token"] = data.get("Telegram.BotToken", "")
-                        if not config.get("default_chat_id"): config["default_chat_id"] = data.get("Telegram.DefaultChatId", "")
-                        if not config.get("lora_mapping"): config["lora_mapping"] = data.get("Telegram.LoraMapping", "")
-                        if not config.get("nsfw_channel_id"): config["nsfw_channel_id"] = data.get("Telegram.NSFWChannelId", "")
-                        if not config.get("unsorted_channel_id"): config["unsorted_channel_id"] = data.get("Telegram.UnsortedChannelId", "")
+                    if not config.get("bot_token"): config["bot_token"] = data.get("Telegram.BotToken", "")
+                    if not config.get("default_chat_id"): config["default_chat_id"] = data.get("Telegram.DefaultChatId", "")
+                    if not config.get("lora_mapping"): config["lora_mapping"] = data.get("Telegram.LoraMapping", "")
+                    if not config.get("nsfw_channel_id"): config["nsfw_channel_id"] = data.get("Telegram.NSFWChannelId", "")
+                    if not config.get("unsorted_channel_id"): config["unsorted_channel_id"] = data.get("Telegram.UnsortedChannelId", "")
+                    if not config.get("civitai_api_key"): config["civitai_api_key"] = data.get("Telegram.CivitaiApiKey", "")
+                    if not config.get("civitai_nsfw_level"): config["civitai_nsfw_level"] = data.get("Telegram.CivitaiNsfwLevel", "")
             except: pass
         return config
 

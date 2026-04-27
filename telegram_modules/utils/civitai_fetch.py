@@ -262,16 +262,22 @@ def _make_request(
 ) -> dict:
     """
     Make HTTP request to CivitAI API with retry support.
-    
+
     Raises:
-        CivitaiAPIError: On non-retryable errors or max retries exceeded
+    CivitaiAPIError: On non-retryable errors or max retries exceeded
     """
     if headers is None:
         headers = {}
-    
+
     headers["User-Agent"] = USER_AGENT
-    
+
     api_key = os.getenv("CIVITAI_API_KEY")
+    if not api_key:
+        try:
+            from ...telegram_settings import get_civitai_api_key
+            api_key = get_civitai_api_key()
+        except Exception:
+            pass
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     
