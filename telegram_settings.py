@@ -6,7 +6,6 @@ Robust version: Uses folder_paths to find config reliably.
 import os
 import json
 import sys
-from comfy.settings import Settings # type: ignore
 
 try:
     import folder_paths # type: ignore
@@ -14,6 +13,7 @@ except ImportError:
     folder_paths = None
 
 _settings = None
+_settings_available = None
 
 NSFW_LEVEL_CHOICES = {
     "PG": 1,
@@ -23,10 +23,12 @@ NSFW_LEVEL_CHOICES = {
     "XXX": 5,
 }
 
-def get_settings():
-    """Get or create the Settings object"""
-    global _settings
-    if _settings is None:
+def _try_init_settings():
+    global _settings, _settings_available
+    if _settings_available is not None:
+        return _settings_available
+    try:
+        from comfy.settings import Settings # type: ignore
         _settings = Settings("Telegram")
         _settings.add_setting("BotToken", default="", type="string", secret=True)
         _settings.add_setting("DefaultChatId", default="", type="string")
@@ -35,34 +37,14 @@ def get_settings():
         _settings.add_setting("UnsortedChannelId", default="", type="string")
         _settings.add_setting("CivitaiApiKey", default="", type="string", secret=True)
         _settings.add_setting("CivitaiNsfwLevel", default="PG", type="combo", choices=list(NSFW_LEVEL_CHOICES.keys()))
+        _settings_available = True
+    except Exception:
+        _settings_available = False
+    return _settings_available
+
+def get_settings():
+    _try_init_settings()
     return _settings
-
-def get_civitai_api_key():
-    """Get CivitAI API key from settings, with env var fallback."""
-    settings = get_settings()
-    key = settings.get("CivitaiApiKey") or ""
-    if not key:
-        try:
-            file_data = _manual_read_from_file()
-            key = file_data.get("Telegram.CivitaiApiKey", "")
-        except Exception:
-            pass
-    if not key:
-        key = os.getenv("CIVITAI_API_KEY", "")
-    return key
-
-def get_civitai_nsfw_level():
-    """Get max NSFW level for CivitAI previews from settings."""
-    settings = get_settings()
-    level_name = settings.get("CivitaiNsfwLevel") or ""
-    if not level_name:
-        try:
-            file_data = _manual_read_from_file()
-            level_name = file_data.get("Telegram.CivitaiNsfwLevel", "")
-        except Exception:
-            pass
-    level = NSFW_LEVEL_CHOICES.get(level_name, 1)
-    return level
 
 def _manual_read_from_file():
     """Fallback: Manually read user/default/comfy.settings.json"""
@@ -98,28 +80,41 @@ def _manual_read_from_file():
         print(f"[Telegram Settings] CRITICAL FAIL: {e}")
         return {}
 
+def _get_setting_value(key, file_data=None):
+    if _settings_available and _settings:
+        try:
+            val = _settings.get(key)
+            if val:
+                return val
+        except Exception:
+            pass
+    if file_data is None:
+        file_data = _manual_read_from_file()
+    return file_data.get(f"Telegram.{key}", "")
+
+def get_civitai_api_key():
+    key = _get_setting_value("CivitaiApiKey")
+    if not key:
+        key = os.getenv("CIVITAI_API_KEY", "")
+    return key
+
+def get_civitai_nsfw_level():
+    level_name = _get_setting_value("CivitaiNsfwLevel")
+    level = NSFW_LEVEL_CHOICES.get(level_name, 1)
+    return level
+
 def get_config():
     """Get all settings"""
-    settings = get_settings()
+    _try_init_settings()
+    file_data = _manual_read_from_file() if not _settings_available else {}
 
-    bot_token = settings.get("BotToken") or ""
-    chat_id = settings.get("DefaultChatId") or ""
-    lora_map = settings.get("LoraMapping") or ""
-    nsfw_id = settings.get("NSFWChannelId") or ""
-    unsorted_id = settings.get("UnsortedChannelId") or ""
-    civitai_key = settings.get("CivitaiApiKey") or ""
-    civitai_nsfw_level = settings.get("CivitaiNsfwLevel") or ""
-
-    if not bot_token:
-        file_data = _manual_read_from_file()
-
-    if not bot_token: bot_token = file_data.get("Telegram.BotToken", "")
-    if not chat_id: chat_id = file_data.get("Telegram.DefaultChatId", "")
-    if not lora_map: lora_map = file_data.get("Telegram.LoraMapping", "")
-    if not nsfw_id: nsfw_id = file_data.get("Telegram.NSFWChannelId", "")
-    if not unsorted_id: unsorted_id = file_data.get("Telegram.UnsortedChannelId", "")
-    if not civitai_key: civitai_key = file_data.get("Telegram.CivitaiApiKey", "")
-    if not civitai_nsfw_level: civitai_nsfw_level = file_data.get("Telegram.CivitaiNsfwLevel", "")
+    bot_token = _get_setting_value("BotToken", file_data)
+    chat_id = _get_setting_value("DefaultChatId", file_data)
+    lora_map = _get_setting_value("LoraMapping", file_data)
+    nsfw_id = _get_setting_value("NSFWChannelId", file_data)
+    unsorted_id = _get_setting_value("UnsortedChannelId", file_data)
+    civitai_key = _get_setting_value("CivitaiApiKey", file_data)
+    civitai_nsfw_level = _get_setting_value("CivitaiNsfwLevel", file_data)
 
     return {
         "bot_token": bot_token,
