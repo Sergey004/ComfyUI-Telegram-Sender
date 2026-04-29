@@ -182,6 +182,8 @@ class TelegramSender:
         metadata_text = self._build_metadata_text(positive_prompt, negative_prompt, prompt, extra_pnginfo, enable_enhanced_metadata)
         loras_in_workflow = await self._extract_loras_from_workflow(prompt, extra_pnginfo, enable_enhanced_metadata) if prompt else []
 
+        results = []
+
         for i, image in enumerate(images):
             try:
                 img_np = (255. * image.cpu().numpy()).astype(np.uint8)
@@ -257,6 +259,11 @@ class TelegramSender:
                 
                 pil_image.save(temp_path, "PNG", pnginfo=pnginfo)
                 
+                # Add to results for UI display
+                filename = os.path.basename(temp_path)
+                subfolder = os.path.relpath(save_dir, self.output_dir)
+                results.append({"filename": filename, "subfolder": subfolder, "type": self.type})
+                
                 target_chat_id = self._determine_chat_id(
                     chat_id, positive_prompt, negative_prompt, 
                     enable_nsfw_detection, nsfw_channel_id, unsorted_channel_id,
@@ -301,7 +308,7 @@ class TelegramSender:
             except Exception as e:
                 print(f"[Telegram Sender] ❌ Error processing image {i}: {e}")
         
-        return (images,)
+        return {"ui": {"images": results}, "result": (images,)}
 
     def _build_metadata_text(self, positive_prompt, negative_prompt, prompt_dict, extra_pnginfo, enable_enhanced=True):
         parts = []
