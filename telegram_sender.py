@@ -1,23 +1,24 @@
 import asyncio
+import ast
 import os
 import re
 import requests
 import threading
-import time
 import json
-import sys
-import socket
-from queue import Queue, Empty
-sys.path.append("../../")
+import shutil
+import tempfile
+import time
+import uuid
+from queue import Queue
 import folder_paths
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
 from datetime import datetime
-from urllib3.exceptions import ProtocolError
 from server import PromptServer
 from aiohttp import web
 from .telegram_modules.utils.schedulerl_sel import SchedulerSelectorKSampler
+from .telegram_modules.utils.civitai_scan import civitai_scan_manager
 
 
 # --- PART 1: API FOR MIGRATION ---
@@ -36,25 +37,66 @@ async def get_legacy_config(request):
             return web.json_response({"error": str(e)})
     return web.json_response({})
 
-# Global queue (SEMAPHORE = 2)
-_upload_semaphore = threading.Semaphore(2)
-_upload_lock = threading.Lock()
 
-# --- PART 2: IMPORT SETTINGS ---
-try:
-    from .telegram_settings import get_config
-except:
-    def get_config(): return {}
+@PromptServer.instance.routes.post("/telegram_sender/civitai_fetch")
+async def start_civitai_fetch(request):
+    try:
+        from .telegram_settings import get_civitai_nsfw_level
 
-# Import metadata wrapper
-try:
-    from .telegram_metadata import TelegramMetadata
-except:
-    class TelegramMetadata:
-        @staticmethod
-        def get_metadata(p, n=False): return {}
-        @staticmethod
-        def get_parameters_str(p): return ""
+        status = civitai_scan_manager.start(
+            max_nsfw_level=get_civitai_nsfw_level(),
+            force=request.query.get("force") == "1",
+        )
+        return web.json_response(status)
+    except Exception as error:
+        print(f"[Telegram Sender] Could not start CivitAI scan: {error}")
+        return web.json_response({"error": str(error)}, status=500)
+
+
+@PromptServer.instance.routes.post("/telegram_sender/civitai_fetch/cancel")
+async def cancel_civitai_fetch(request):
+    civitai_scan_manager.stop(timeout=0)
+    return web.json_response(civitai_scan_manager.get_status())
+
+
+@PromptServer.instance.routes.get("/telegram_sender/civitai_fetch_status")
+async def get_civitai_fetch_status(request):
+    return web.json_response(civitai_scan_manager.get_status())
+
+
+class TelegramUploadQueue:
+    def __init__(self):
+        self._tasks = Queue(maxsize=2)
+        self._lock = threading.Lock()
+        self._workers = []
+
+    def submit(self, function, *args):
+        with self._lock:
+            while len(self._workers) < 2:
+                worker = threading.Thread(
+                    target=self._work,
+                    name=f"TelegramUpload-{len(self._workers) + 1}",
+                    daemon=True,
+                )
+                worker.start()
+                self._workers.append(worker)
+        self._tasks.put((function, args))
+
+    def _work(self):
+        while True:
+            function, args = self._tasks.get()
+            try:
+                function(*args)
+            except Exception as error:
+                print(f"[Telegram Sender] Telegram upload worker failed: {error}")
+            finally:
+                self._tasks.task_done()
+
+
+_upload_queue = TelegramUploadQueue()
+
+from .telegram_settings import get_config
+from .telegram_metadata import TelegramMetadata
 
 # --- PART 3: OLD NSFW LOGIC ---
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -83,14 +125,21 @@ def load_nsfw_triggers():
             nkw = data.get('negative_keywords') or []
             nrx = data.get('negative_regex') or []
             keywords = [str(x).lower() for x in kw]
-            regex = [str(x) for x in rx]
+            for pattern in rx:
+                try:
+                    re.compile(str(pattern))
+                    regex.append(str(pattern))
+                except re.error as error:
+                    print(f"[Telegram Sender] Ignoring invalid NSFW pattern {pattern!r}: {error}")
             negative_keywords = [str(x).lower() for x in nkw]
             negative_regex = [str(x) for x in nrx]
         result = {'keywords': keywords, 'regex': regex, 'negative_keywords': negative_keywords, 'negative_regex': negative_regex}
         _nsfw_triggers_cache = result
         _nsfw_triggers_mtime = mtime
         return result
-    except: return None
+    except (OSError, json.JSONDecodeError, TypeError) as error:
+        print(f"[Telegram Sender] Could not load NSFW triggers: {error}")
+        return None
 
 class TelegramConfig:
     @classmethod
@@ -155,160 +204,207 @@ class TelegramSender:
                     if not config.get("unsorted_channel_id"): config["unsorted_channel_id"] = data.get("Telegram.UnsortedChannelId", "")
                     if not config.get("civitai_api_key"): config["civitai_api_key"] = data.get("Telegram.CivitaiApiKey", "")
                     if not config.get("civitai_nsfw_level"): config["civitai_nsfw_level"] = data.get("Telegram.CivitaiNsfwLevel", "")
-            except: pass
+            except (OSError, json.JSONDecodeError, TypeError) as error:
+                print(f"[Telegram Sender] Could not read ComfyUI settings: {error}")
         return config
 
-    async def send_to_telegram(self, images, chat_id="", bot_token_override="", 
-                        positive_prompt="", negative_prompt="",
-                        send_as_document=False, max_size=2560, 
-                        landscape_max_width=5120, enable_nsfw_detection=False,
-                        nsfw_channel_id="", unsorted_channel_id="",
-                        enable_lora_routing=True, retry_count=3, retry_delay=5,
-                        enable_enhanced_metadata=True, filename_prefix="",
-                        subdirectory_name="", debug_metadata=False,
-                        prompt=None, extra_pnginfo=None):
-        
+    async def send_to_telegram(
+        self,
+        images,
+        chat_id="",
+        bot_token_override="",
+        positive_prompt="",
+        negative_prompt="",
+        send_as_document=False,
+        max_size=2560,
+        landscape_max_width=5120,
+        enable_nsfw_detection=False,
+        nsfw_channel_id="",
+        unsorted_channel_id="",
+        enable_lora_routing=True,
+        retry_count=3,
+        retry_delay=5,
+        enable_enhanced_metadata=True,
+        filename_prefix="",
+        subdirectory_name="",
+        debug_metadata=False,
+        prompt=None,
+        extra_pnginfo=None,
+    ):
         full_config = self._get_full_config()
         bot_token = bot_token_override.strip() if bot_token_override else full_config.get("bot_token", "")
-        
+        chat_id = chat_id or full_config.get("default_chat_id", "")
+        nsfw_channel_id = nsfw_channel_id or full_config.get("nsfw_channel_id", "")
+        unsorted_channel_id = unsorted_channel_id or full_config.get("unsorted_channel_id", "")
+
         if not bot_token:
-            print("[Telegram Sender] ⚠️ No bot token configured. Images will be saved locally.")
-            bot_token = ""
-        
-        if not chat_id: chat_id = full_config.get("default_chat_id", "")
-        if not nsfw_channel_id: nsfw_channel_id = full_config.get("nsfw_channel_id", "")
-        if not unsorted_channel_id: unsorted_channel_id = full_config.get("unsorted_channel_id", "")
+            print("[Telegram Sender] No bot token configured; images will only be saved locally.")
 
-        metadata_text = self._build_metadata_text(positive_prompt, negative_prompt, prompt, extra_pnginfo, enable_enhanced_metadata)
-        loras_in_workflow = await self._extract_loras_from_workflow(prompt, extra_pnginfo, enable_enhanced_metadata) if prompt else []
-
+        metadata_text = self._build_metadata_text(
+            positive_prompt,
+            negative_prompt,
+            prompt,
+            extra_pnginfo,
+            enable_enhanced_metadata,
+        )
+        loras_in_workflow = (
+            await self._extract_loras_from_workflow(prompt, extra_pnginfo, enable_enhanced_metadata)
+            if prompt else []
+        )
         results = []
 
-        for i, image in enumerate(images):
+        for index, image in enumerate(images):
             try:
-                img_np = (255. * image.cpu().numpy()).astype(np.uint8)
-                pil_image = Image.fromarray(img_np)
-                
                 pnginfo_dict = {}
-                
-                # FIRST: Try to get seed directly from workflow (most reliable)
-                direct_seed = None
-                if prompt:
-                    try:
-                        for node_id, node in prompt.items():
-                            class_type = node.get("class_type", "")
-                            inputs = node.get("inputs", {})
-                            if "sampler" in class_type.lower() or "ksampler" in class_type.lower():
-                                # Try multiple seed field names
-                                seed = inputs.get("seed") or inputs.get("noise_seed") or inputs.get("seed_value")
-                                if seed is not None:
-                                    # Use the same normalization as _format_filename
-                                    normalized_seed = self._normalize_seed_value(seed)
-                                    if normalized_seed:
-                                        direct_seed = normalized_seed
-                                        if debug_metadata:
-                                            print(f"[Telegram Sender] DEBUG: Direct seed from {class_type}: {seed} → {direct_seed}")
-                                        break
-                    except Exception as e:
-                        if debug_metadata:
-                            print(f"[Telegram Sender] DEBUG: Direct seed extract error: {e}")
-                
-                # SECOND: Try to get metadata via TelegramMetadata
+                direct_seed = self._extract_direct_seed(prompt)
                 if enable_enhanced_metadata and prompt:
-                    try: 
-                        pnginfo_dict = await TelegramMetadata.get_metadata(prompt)
-                        if debug_metadata:
-                            print(f"[Telegram Sender] DEBUG: pnginfo_dict = {pnginfo_dict}")
-                    except Exception as e:
-                        print(f"[Telegram Sender] ⚠️ Warning: Could not extract metadata: {e}")
-                        pnginfo_dict = {}
-                
-                # THIRD: If we got direct seed and pnginfo_dict is missing it, add it
+                    try:
+                        pnginfo_dict = await TelegramMetadata.get_metadata(prompt) or {}
+                    except Exception as error:
+                        print(f"[Telegram Sender] Could not extract metadata: {error}")
                 if direct_seed is not None and not pnginfo_dict.get("Seed"):
                     pnginfo_dict["Seed"] = direct_seed
-                    if debug_metadata:
-                        print(f"[Telegram Sender] DEBUG: Added direct seed to pnginfo_dict")
-                
-                formatted_filename = self._format_filename(filename_prefix.strip(), pnginfo_dict)
-                if not formatted_filename: formatted_filename = f"telegram_temp_{int(time.time())}_{i}"
-                
-                save_dir = self.output_dir
-                if subdirectory_name.strip():
-                    formatted_subdir = self._format_filename(subdirectory_name.strip(), pnginfo_dict)
-                    save_dir = os.path.join(self.output_dir, formatted_subdir)
-                    os.makedirs(save_dir, exist_ok=True)
-                
-                temp_path = os.path.join(save_dir, f"{formatted_filename}.png")
-                
-                pnginfo = PngInfo()
-                if enable_enhanced_metadata and pnginfo_dict:
-                    try:
-                        params_str = TelegramMetadata.get_parameters_str(pnginfo_dict)
-                        if params_str: pnginfo.add_text("parameters", params_str)
-                        for key, value in pnginfo_dict.items():
-                            if value and isinstance(value, (str, int, float)):
-                                pnginfo.add_text(key, str(value))
-                    except: pass
-                elif metadata_text:
-                    pnginfo.add_text("parameters", metadata_text)
-                
-                if prompt: pnginfo.add_text("prompt", json.dumps(prompt))
-                if extra_pnginfo:
-                    for k, v in extra_pnginfo.items():
-                        pnginfo.add_text(k, json.dumps(v) if isinstance(v, dict) else str(v))
-                
-                pil_image.save(temp_path, "PNG", pnginfo=pnginfo)
-                
-                # Add to results for UI display
-                filename = os.path.basename(temp_path)
-                subfolder = os.path.relpath(save_dir, self.output_dir)
-                results.append({"filename": filename, "subfolder": subfolder, "type": self.type})
-                
-                target_chat_id = self._determine_chat_id(
-                    chat_id, positive_prompt, negative_prompt, 
-                    enable_nsfw_detection, nsfw_channel_id, unsorted_channel_id,
-                    enable_lora_routing, loras_in_workflow, full_config
-                )
-                
-                if not target_chat_id:
-                    print("[Telegram Sender] ⚠️ No valid chat_id determined. Skipping image.")
-                    self._cleanup_file(temp_path)
-                    continue
-                
-                # --- STEP 1: SEND PHOTO ---
-                photo_path = self._resize_image(temp_path, max_size, landscape_max_width)
-                if os.path.getsize(photo_path) > 10 * 1024 * 1024:
-                    photo_path = self._compress_image(photo_path)
-                
-                self._ensure_file_synced(photo_path)
-                
-                if bot_token and target_chat_id:
-                    threading.Thread(
-                        target=self._send_telegram_request,
-                        args=(photo_path, target_chat_id, bot_token, False, temp_path, retry_count, retry_delay),
-                        daemon=True
-                    ).start()
-                else:
-                    print(f"[Telegram Sender] 💾 Saved image to {photo_path} (not sent)")
-                
-                # --- STEP 2: SEND DOCUMENT (AFTER PHOTO) ---
-                if send_as_document:
-                    self._ensure_file_synced(temp_path)
-                    time.sleep(2) # Delay
-                    if bot_token and target_chat_id:
-                        print(f"[Telegram Sender] 📄 Sending as Document...") # LOG
-                        threading.Thread(
-                            target=self._send_telegram_request,
-                            args=(temp_path, target_chat_id, bot_token, True, temp_path, retry_count, retry_delay),
-                            daemon=True
-                        ).start()
-                    else:
-                        print(f"[Telegram Sender] 💾 Saved original PNG to {temp_path} (not sent)")
 
-            except Exception as e:
-                print(f"[Telegram Sender] ❌ Error processing image {i}: {e}")
-        
+                formatted_filename = self._safe_filename(
+                    self._format_filename(filename_prefix.strip(), pnginfo_dict)
+                )
+                if not formatted_filename:
+                    formatted_filename = f"telegram_{uuid.uuid4().hex}"
+                save_dir = self._resolve_output_directory(subdirectory_name, pnginfo_dict)
+                os.makedirs(save_dir, exist_ok=True)
+                output_path = self._reserve_output_path(save_dir, formatted_filename)
+
+                pnginfo = self._create_pnginfo(
+                    pnginfo_dict,
+                    metadata_text,
+                    enable_enhanced_metadata,
+                    prompt,
+                    extra_pnginfo,
+                )
+                try:
+                    await asyncio.to_thread(self._write_output_image, image, output_path, pnginfo)
+                except Exception:
+                    if os.path.exists(output_path):
+                        try:
+                            os.remove(output_path)
+                        except OSError as cleanup_error:
+                            print(f"[Telegram Sender] Could not remove incomplete output: {cleanup_error}")
+                    raise
+                results.append({
+                    "filename": os.path.basename(output_path),
+                    "subfolder": os.path.relpath(save_dir, self.output_dir),
+                    "type": self.type,
+                })
+
+                target_chat_id = self._determine_chat_id(
+                    chat_id,
+                    positive_prompt,
+                    negative_prompt,
+                    enable_nsfw_detection,
+                    nsfw_channel_id,
+                    unsorted_channel_id,
+                    enable_lora_routing,
+                    loras_in_workflow,
+                    full_config,
+                )
+                if not target_chat_id:
+                    print("[Telegram Sender] No valid chat ID determined; image was saved locally.")
+                    continue
+                if not bot_token:
+                    continue
+
+                await asyncio.to_thread(
+                    _upload_queue.submit,
+                    self._send_telegram_request,
+                    output_path,
+                    target_chat_id,
+                    bot_token,
+                    send_as_document,
+                    retry_count,
+                    retry_delay,
+                    max_size,
+                    landscape_max_width,
+                )
+            except Exception as error:
+                print(f"[Telegram Sender] Failed to process image {index}: {error}")
+
         return {"ui": {"images": results}, "result": (images,)}
+
+    def _extract_direct_seed(self, prompt):
+        if not prompt:
+            return None
+        try:
+            for node in prompt.values():
+                class_type = node.get("class_type", "")
+                inputs = node.get("inputs", {})
+                if "sampler" in class_type.lower() or "ksampler" in class_type.lower():
+                    seed = inputs.get("seed") or inputs.get("noise_seed") or inputs.get("seed_value")
+                    normalized = self._normalize_seed_value(seed)
+                    if normalized:
+                        return normalized
+        except (AttributeError, TypeError) as error:
+            print(f"[Telegram Sender] Could not read seed from workflow: {error}")
+        return None
+
+    def _resolve_output_directory(self, subdirectory_name, metadata):
+        output_root = os.path.realpath(self.output_dir)
+        subdirectory = self._format_filename(subdirectory_name.strip(), metadata) if subdirectory_name.strip() else ""
+        if subdirectory:
+            relative = os.path.normpath(subdirectory)
+            if os.path.isabs(relative) or relative == os.pardir or relative.startswith(os.pardir + os.sep):
+                raise ValueError("Subdirectory must stay inside the ComfyUI output directory")
+            output_dir = os.path.realpath(os.path.join(output_root, relative))
+        else:
+            output_dir = output_root
+        if os.path.commonpath((output_root, output_dir)) != output_root:
+            raise ValueError("Subdirectory must stay inside the ComfyUI output directory")
+        return output_dir
+
+    @staticmethod
+    def _safe_filename(filename):
+        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", filename)
+        return filename.strip(" .")
+
+    @staticmethod
+    def _reserve_output_path(output_dir, filename):
+        while True:
+            suffix = f"_{uuid.uuid4().hex[:8]}" if os.path.exists(
+                os.path.join(output_dir, f"{filename}.png")
+            ) else ""
+            path = os.path.join(output_dir, f"{filename}{suffix}.png")
+            try:
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            except FileExistsError:
+                continue
+            os.close(descriptor)
+            return path
+
+    @staticmethod
+    def _create_pnginfo(pnginfo_dict, metadata_text, enhanced, prompt, extra_pnginfo):
+        pnginfo = PngInfo()
+        if enhanced and pnginfo_dict:
+            try:
+                params_str = TelegramMetadata.get_parameters_str(pnginfo_dict)
+                if params_str:
+                    pnginfo.add_text("parameters", params_str)
+                for key, value in pnginfo_dict.items():
+                    if value and isinstance(value, (str, int, float)):
+                        pnginfo.add_text(str(key), str(value))
+            except Exception as error:
+                print(f"[Telegram Sender] Could not encode enhanced metadata: {error}")
+        elif metadata_text:
+            pnginfo.add_text("parameters", metadata_text)
+        if prompt:
+            pnginfo.add_text("prompt", json.dumps(prompt, default=str))
+        if extra_pnginfo:
+            for key, value in extra_pnginfo.items():
+                pnginfo.add_text(str(key), json.dumps(value, default=str))
+        return pnginfo
+
+    @staticmethod
+    def _write_output_image(image, output_path, pnginfo):
+        image_array = (255.0 * image.cpu().numpy()).astype(np.uint8)
+        Image.fromarray(image_array).save(output_path, "PNG", pnginfo=pnginfo)
 
     def _build_metadata_text(self, positive_prompt, negative_prompt, prompt_dict, extra_pnginfo, enable_enhanced=True):
         parts = []
@@ -318,7 +414,8 @@ class TelegramSender:
             try:
                 params = self._extract_parameters_from_workflow(prompt_dict)
                 if params: parts.append(params)
-            except: pass
+            except (AttributeError, TypeError) as error:
+                print(f"[Telegram Sender] Could not extract workflow parameters: {error}")
         return "\n".join(parts)
 
     def _extract_parameters_from_workflow(self, prompt_dict):
@@ -339,7 +436,8 @@ class TelegramSender:
                 if "lora" in class_type:
                     name = inputs.get("lora_name")
                     if name: params.append(f"Lora: {name}")
-        except: pass
+        except (AttributeError, TypeError) as error:
+            print(f"[Telegram Sender] Could not parse workflow parameters: {error}")
         return ", ".join(params)
 
     # --- ORIGINAL LORA EXTRACTION (CRITICAL FOR ROUTING) ---
@@ -354,7 +452,8 @@ class TelegramSender:
                         lora_name = part.split(":")[0].strip()
                         if lora_name: loras.append(lora_name.lower().strip())
                     if loras: return loras
-            except: pass
+            except Exception as error:
+                print(f"[Telegram Sender] Could not extract LoRA metadata: {error}")
         try:
             for node in prompt_dict.values():
                 class_type = node.get("class_type", "")
@@ -363,7 +462,8 @@ class TelegramSender:
                     if name:
                         clean = os.path.splitext(os.path.basename(name))[0].lower().strip()
                         if clean not in loras: loras.append(clean)
-        except: pass
+        except (AttributeError, TypeError) as error:
+            print(f"[Telegram Sender] Could not inspect workflow LoRAs: {error}")
         return loras
 
     # --- NEW REGEX PARSER (ONLY CHANGE TO SUPPORT NEW CONFIG FORMAT) ---
@@ -383,7 +483,8 @@ class TelegramSender:
                 lora_key = lora_key.strip(" _")
                 if lora_key and chat_id: 
                     mapping[lora_key] = chat_id
-            except: pass
+            except (AttributeError, TypeError) as error:
+                print(f"[Telegram Sender] Could not parse LoRA mapping entry: {error}")
         return mapping
 
     def _determine_chat_id(self, default_chat_id, positive_prompt, negative_prompt,
@@ -424,82 +525,104 @@ class TelegramSender:
         return target_chat_id
 
     def _resize_image(self, image_path, max_size, landscape_max_width):
-        try:
-            with Image.open(image_path) as img:
-                w, h = img.size
-                if w >= h:
-                    if w <= landscape_max_width: return image_path
-                    max_val = landscape_max_width
-                else:
-                    if max(w, h) <= max_size: return image_path
-                    max_val = max_size
-                ratio = max_val / max(w, h)
-                new_size = (int(w * ratio), int(h * ratio))
-                img = img.resize(new_size, Image.LANCZOS)
-                temp_path = os.path.splitext(image_path)[0] + "_resized.jpg"
-                img.save(temp_path, "JPEG", quality=85, optimize=True)
-                return temp_path
-        except: return image_path
+        with Image.open(image_path) as image:
+            width, height = image.size
+            maximum = max(1, landscape_max_width if width >= height else max_size)
+            if max(width, height) <= maximum:
+                return image_path
+            ratio = maximum / max(width, height)
+            new_size = (max(1, int(width * ratio)), max(1, int(height * ratio)))
+            resampling = getattr(Image, "Resampling", Image)
+            resized = image.convert("RGB").resize(new_size, resampling.LANCZOS)
+            temp_path = os.path.splitext(image_path)[0] + "_resized.jpg"
+            resized.save(temp_path, "JPEG", quality=85, optimize=True)
+            return temp_path
 
     def _compress_image(self, image_path, target_size=10 * 1024 * 1024):
         temp_path = os.path.splitext(image_path)[0] + "_compressed.jpg"
-        quality = 85
-        try:
-            with Image.open(image_path) as img:
-                while quality >= 30:
-                    img.save(temp_path, "JPEG", quality=quality, optimize=True)
-                    if os.path.getsize(temp_path) <= target_size: return temp_path
-                    quality -= 10
-                return temp_path
-        except: return image_path
+        with Image.open(image_path) as image:
+            rgb_image = image.convert("RGB")
+            for quality in range(85, 24, -10):
+                rgb_image.save(temp_path, "JPEG", quality=quality, optimize=True)
+                if os.path.getsize(temp_path) <= target_size:
+                    return temp_path
+        if os.path.getsize(temp_path) > target_size:
+            raise ValueError(f"Could not compress Telegram photo below {target_size} bytes")
+        return temp_path
 
-    # --- ORIGINAL SEND LOGIC + TIMEOUT FIX ---
-    def _send_telegram_request(self, image_path, chat_id, bot_token, 
-                               as_document, original_path, retry_count, retry_delay):
-        with _upload_semaphore:
-            method = "sendDocument" if as_document else "sendPhoto"
-            param_name = "document" if as_document else "photo"
-            url = f"https://api.telegram.org/bot{bot_token}/{method}"
-            
-            wait_time = 0
-            while not os.path.exists(image_path) and wait_time < 30:
-                time.sleep(0.1); wait_time += 0.1
-            
-            # TIMEOUT FIX: Increase timeout for slow internet
+    def _send_telegram_request(
+        self,
+        output_path,
+        chat_id,
+        bot_token,
+        send_as_document,
+        retry_count,
+        retry_delay,
+        max_size,
+        landscape_max_width,
+    ):
+        with tempfile.TemporaryDirectory(prefix="telegram-upload-") as temp_dir:
+            photo_copy = os.path.join(temp_dir, "photo.png")
+            shutil.copyfile(output_path, photo_copy)
+            photo_path = self._resize_image(photo_copy, max_size, landscape_max_width)
+            if os.path.getsize(photo_path) > 10 * 1024 * 1024:
+                photo_path = self._compress_image(photo_path)
+            self._send_upload(
+                photo_path,
+                chat_id,
+                bot_token,
+                as_document=False,
+                retry_count=retry_count,
+                retry_delay=retry_delay,
+            )
+            if send_as_document:
+                self._send_upload(
+                    output_path,
+                    chat_id,
+                    bot_token,
+                    as_document=True,
+                    retry_count=retry_count,
+                    retry_delay=retry_delay,
+                )
+
+    @staticmethod
+    def _send_upload(image_path, chat_id, bot_token, as_document, retry_count, retry_delay):
+        method = "sendDocument" if as_document else "sendPhoto"
+        param_name = "document" if as_document else "photo"
+        url = f"https://api.telegram.org/bot{bot_token}/{method}"
+        file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
+        timeout = (10, max(60, min(180, 60 + int(file_size_mb * 5))))
+        attempts = max(1, int(retry_count))
+
+        for attempt in range(attempts):
             try:
-                file_size_mb = os.path.getsize(image_path) / (1024 * 1024)
-                timeout_val = max(60, min(600, 60 + int(file_size_mb * 10))) # Up to 10 min
-            except: timeout_val = 60
-
-            for attempt in range(retry_count):
-                try:
-                    with open(image_path, 'rb') as f:
-                        response = requests.post(url, data={'chat_id': chat_id}, files={param_name: f}, timeout=timeout_val)
-                    if response.ok:
-                        # LOG with Type
-                        ftype = "Document" if as_document else "Photo"
-                        print(f"[Telegram Sender] ✅ Sent to {chat_id} ({ftype})")
-                        if not as_document and image_path != original_path:
-                            try: os.remove(image_path)
-                            except: pass
-                        return
-                    else:
-                        print(f"[Telegram Sender] ❌ Error: {response.text}")
-                except Exception as e:
-                    print(f"[Telegram Sender] ❌ Error: {e}")
-                time.sleep(retry_delay)
-
-    def _cleanup_file(self, path):
-        if path and os.path.exists(path) and "telegram_temp" in path:
-            try: os.remove(path)
-            except: pass
-
-    def _ensure_file_synced(self, file_path):
-        if not os.path.exists(file_path): return
-        try:
-            if hasattr(os, 'fsync'):
-                with open(file_path, 'rb') as f: os.fsync(f.fileno())
-        except: pass
+                with open(image_path, "rb") as image_file:
+                    with requests.post(
+                        url,
+                        data={"chat_id": chat_id},
+                        files={param_name: image_file},
+                        timeout=timeout,
+                    ) as response:
+                        if response.ok:
+                            try:
+                                result = response.json()
+                            except ValueError:
+                                result = {"ok": True}
+                            if isinstance(result, dict) and result.get("ok", True):
+                                file_type = "Document" if as_document else "Photo"
+                                print(f"[Telegram Sender] Sent to {chat_id} ({file_type})")
+                                return True
+                        response_text = response.text.replace(bot_token, "[redacted]") if bot_token else response.text
+                        print(f"[Telegram Sender] Telegram API rejected upload: {response_text}")
+            except (OSError, requests.RequestException) as error:
+                message = str(error).replace(bot_token, "[redacted]") if bot_token else str(error)
+                print(
+                    f"[Telegram Sender] Telegram upload attempt {attempt + 1} "
+                    f"failed ({type(error).__name__}): {message}"
+                )
+            if attempt + 1 < attempts:
+                time.sleep(max(0, retry_delay))
+        return False
 
     def _normalize_seed_value(self, seed_value):
         """
@@ -525,21 +648,22 @@ class TelegramSender:
         # Handle string representation of list: "[183, 0]" -> "183"
         if seed_str.startswith("[") and seed_str.endswith("]"):
             try:
-                # Parse the string list representation
-                parsed = eval(seed_str)  # Safe here since we control the format
+                parsed = ast.literal_eval(seed_str)
                 if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
                     seed_value = parsed[0]
+                    if not isinstance(seed_value, (int, float, str)) or isinstance(seed_value, bool):
+                        return None
                     seed_str = str(seed_value).strip()
                 else:
                     return None
-            except:
-                pass
+            except (ValueError, SyntaxError, TypeError):
+                return None
         
         # Try to convert to integer for validation
         try:
             seed_int = int(float(seed_str))  # int(float()) handles "183.0" cases
             return str(seed_int) if seed_int != 0 else None
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             # If can't convert to int, return as string if it's not empty
             return seed_str if seed_str else None
 

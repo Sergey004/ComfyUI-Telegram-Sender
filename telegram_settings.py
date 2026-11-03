@@ -5,15 +5,11 @@ Robust version: Uses folder_paths to find config reliably.
 
 import os
 import json
-import sys
 
 try:
     import folder_paths # type: ignore
 except ImportError:
     folder_paths = None
-
-_settings = None
-_settings_available = None
 
 NSFW_LEVEL_CHOICES = {
     "PG": 1,
@@ -23,71 +19,36 @@ NSFW_LEVEL_CHOICES = {
     "XXX": 5,
 }
 
-def _try_init_settings():
-    global _settings, _settings_available
-    if _settings_available is not None:
-        return _settings_available
-    try:
-        from comfy.settings import Settings # type: ignore
-        _settings = Settings("Telegram")
-        _settings.add_setting("BotToken", default="", type="string", secret=True)
-        _settings.add_setting("DefaultChatId", default="", type="string")
-        _settings.add_setting("LoraMapping", default="", type="text")
-        _settings.add_setting("NSFWChannelId", default="", type="string")
-        _settings.add_setting("UnsortedChannelId", default="", type="string")
-        _settings.add_setting("CivitaiApiKey", default="", type="string", secret=True)
-        _settings.add_setting("CivitaiNsfwLevel", default="PG", type="combo", choices=list(NSFW_LEVEL_CHOICES.keys()))
-        _settings_available = True
-    except Exception:
-        _settings_available = False
-    return _settings_available
-
 def get_settings():
-    _try_init_settings()
-    return _settings
+    """Read ComfyUI's persisted settings file."""
+    return _manual_read_from_file()
 
 def _manual_read_from_file():
     """Fallback: Manually read user/default/comfy.settings.json"""
     try:
         if folder_paths:
-            base_path = folder_paths.base_path
+            user_directory = folder_paths.get_user_directory()
         else:
-            base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            user_directory = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "user",
+            )
 
-        settings_path = os.path.join(base_path, "user", "default", "comfy.settings.json")
-
-        print(f"[Telegram Settings] Trying to read config from: {settings_path}")
+        settings_path = os.path.join(user_directory, "default", "comfy.settings.json")
 
         if not os.path.exists(settings_path):
-            print(f"[Telegram Settings] File not found at path! Checking nearby folders...")
-            user_dir = os.path.join(base_path, "user")
-            if os.path.exists(user_dir):
-                print(f"Contents of 'user' folder: {os.listdir(user_dir)}")
             return {}
 
         with open(settings_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        token = data.get("Telegram.BotToken", "")
-        if token:
-            print(f"[Telegram Settings] Settings file loaded manually.")
-        else:
-            print(f"[Telegram Settings] File opened, but 'Telegram.BotToken' is missing or empty inside.")
-
         return data
 
-    except Exception as e:
-        print(f"[Telegram Settings] CRITICAL FAIL: {e}")
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError) as error:
+        print(f"[Telegram Settings] Could not read settings file: {error}")
         return {}
 
 def _get_setting_value(key, file_data=None):
-    if _settings_available and _settings:
-        try:
-            val = _settings.get(key)
-            if val:
-                return val
-        except Exception:
-            pass
     if file_data is None:
         file_data = _manual_read_from_file()
     return file_data.get(f"Telegram.{key}", "")
@@ -104,9 +65,8 @@ def get_civitai_nsfw_level():
     return level
 
 def get_config():
-    """Get all settings"""
-    _try_init_settings()
-    file_data = _manual_read_from_file() if not _settings_available else {}
+    """Get settings persisted by ComfyUI's frontend settings API."""
+    file_data = _manual_read_from_file()
 
     bot_token = _get_setting_value("BotToken", file_data)
     chat_id = _get_setting_value("DefaultChatId", file_data)
@@ -115,6 +75,11 @@ def get_config():
     unsorted_id = _get_setting_value("UnsortedChannelId", file_data)
     civitai_key = _get_setting_value("CivitaiApiKey", file_data)
     civitai_nsfw_level = _get_setting_value("CivitaiNsfwLevel", file_data)
+    auto_civitai_fetch = _get_setting_value("AutoCivitaiFetch", file_data)
+    if auto_civitai_fetch == "":
+        auto_civitai_fetch = True
+    elif isinstance(auto_civitai_fetch, str):
+        auto_civitai_fetch = auto_civitai_fetch.lower() not in ("false", "0", "no", "")
 
     return {
         "bot_token": bot_token,
@@ -124,6 +89,7 @@ def get_config():
         "unsorted_channel_id": unsorted_id,
         "civitai_api_key": civitai_key,
         "civitai_nsfw_level": civitai_nsfw_level,
+        "auto_civitai_fetch": bool(auto_civitai_fetch),
     }
 
 def force_migrate_from_legacy_config(path):

@@ -1,11 +1,48 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+async function requestScan(action, force = false) {
+    try {
+        const query = force ? "?force=1" : "";
+        const response = await api.fetchApi(`/telegram_sender/civitai_fetch${action}${query}`, {
+            method: "POST",
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || `HTTP ${response.status}`);
+        }
+        app.extensionManager.toast.add({
+            severity: "info",
+            summary: `CivitAI scan: ${data.state}`,
+            detail: data.error || "Check the ComfyUI console for scan progress.",
+            life: 5000,
+        });
+    } catch (error) {
+        console.error("[Telegram Sender] CivitAI scan request failed:", error);
+        app.extensionManager.toast.add({
+            severity: "error",
+            summary: "CivitAI scan request failed",
+            detail: String(error),
+            life: 5000,
+        });
+    }
+}
+
+function scanControl(name, action, force = false) {
+    return () => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = name;
+        button.addEventListener("click", () => requestScan(action, force));
+        return button;
+    };
+}
+
 const TELEGRAM_SETTINGS = [
     {
         id: "Telegram.About",
         name: "Telegram Sender",
-        type: () => {return document.createElement('span')},
+        type: () => document.createElement("span"),
     },
     {
         id: "Telegram.BotToken",
@@ -21,37 +58,27 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Default chat/channel ID for sending images",
     },
-    // --- НАЧАЛО ИЗМЕНЕНИЙ: КАСТОМНОЕ ПОЛЕ LORA MAPPING ---
     {
         id: "Telegram.LoraMapping",
         name: "LoRA to Channel Mapping",
-        // Вместо строки используем функцию для создания HTML элемента
         type: (name, setter, value) => {
             const input = document.createElement("textarea");
-            
-            // Стилизуем под ComfyUI (темная тема)
             input.value = value || "";
-            input.style.width = "100%";     // На всю ширину
-            input.style.height = "120px";   // Высота 120 пикселей
-            input.style.resize = "vertical";// Можно растягивать вниз
+            input.style.width = "100%";
+            input.style.height = "120px";
+            input.style.resize = "vertical";
             input.style.borderRadius = "4px";
-            input.style.backgroundColor = "var(--comfy-input-bg)"; // Цвет фона Comfy
-            input.style.color = "var(--input-text)";               // Цвет текста Comfy
+            input.style.backgroundColor = "var(--comfy-input-bg)";
+            input.style.color = "var(--input-text)";
             input.style.border = "1px solid var(--border-color)";
             input.style.padding = "5px";
-            input.style.fontFamily = "monospace"; // Моноширинный шрифт для удобства
-            
-            // Сохраняем значение при изменении (когда убрали фокус)
-            input.addEventListener("change", () => {
-                setter(input.value);
-            });
-            
+            input.style.fontFamily = "monospace";
+            input.addEventListener("change", () => setter(input.value));
             return input;
         },
         defaultValue: "",
         tooltip: "Format (one per line):\nlora_name:chat_id\nanime:-100123456",
     },
-    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
     {
         id: "Telegram.NSFWChannelId",
         name: "NSFW Channel ID",
@@ -59,93 +86,91 @@ const TELEGRAM_SETTINGS = [
         defaultValue: "",
         tooltip: "Channel ID for NSFW content",
     },
-  {
-    id: "Telegram.UnsortedChannelId",
-    name: "Unsorted Channel ID",
-    type: "string",
-    defaultValue: "",
-    tooltip: "Fallback channel for unrouted images",
-  },
-  {
-    id: "Telegram.CivitaiApiKey",
-    name: "CivitAI API Key",
-    type: "string",
-    defaultValue: "",
-    tooltip: "Your CivitAI API key for downloading gated/private models and NSFW previews. Get it from https://civitai.com/user/account",
-  },
-  {
-    id: "Telegram.CivitaiNsfwLevel",
-    name: "CivitAI Max NSFW Level",
-    type: "combo",
-    options: ["PG", "PG-13", "R", "X", "XXX"],
-    defaultValue: "PG",
-    tooltip: "Maximum NSFW level for CivitAI preview images. PG=SFW only, XXX=allow all. Requires API key for NSFW content.",
-  },
+    {
+        id: "Telegram.UnsortedChannelId",
+        name: "Unsorted Channel ID",
+        type: "string",
+        defaultValue: "",
+        tooltip: "Fallback channel for unrouted images",
+    },
+    {
+        id: "Telegram.CivitaiApiKey",
+        name: "CivitAI API Key",
+        type: "string",
+        defaultValue: "",
+        tooltip: "Your CivitAI API key for downloading gated/private models and NSFW previews.",
+    },
+    {
+        id: "Telegram.CivitaiNsfwLevel",
+        name: "CivitAI Max NSFW Level",
+        type: "combo",
+        options: ["PG", "PG-13", "R", "X", "XXX"],
+        defaultValue: "PG",
+        tooltip: "Maximum NSFW level for CivitAI preview images.",
+    },
+    {
+        id: "Telegram.AutoCivitaiFetch",
+        name: "Automatically fetch CivitAI model information on startup",
+        type: "boolean",
+        defaultValue: true,
+        tooltip: "Start one background scan after the ComfyUI frontend initializes.",
+    },
+    {
+        id: "Telegram.CivitaiFetchNow",
+        name: "Manual CivitAI scan",
+        type: scanControl("Scan now", "", true),
+        defaultValue: "",
+    },
+    {
+        id: "Telegram.CivitaiFetchStop",
+        name: "Cancel CivitAI scan",
+        type: scanControl("Cancel scan", "/cancel"),
+        defaultValue: "",
+    },
 ];
 
 app.registerExtension({
     name: "comfy.telegram_sender",
     settings: TELEGRAM_SETTINGS,
-    
-    // Эта функция запускается один раз при загрузке страницы ComfyUI
+
     async setup() {
         try {
-            // 1. Проверяем, пуст ли токен в ТЕКУЩИХ настройках ComfyUI
-            // Если там что-то есть, значит пользователь уже настроил или миграция прошла
             const currentToken = app.ui.settings.getSettingValue("Telegram.BotToken", "");
-            
-            if (currentToken) {
-                return; // Миграция не нужна, выходим
-            }
-
-            console.log("[Telegram Sender] 📥 Checking for legacy config...");
-
-            // 2. Запрашиваем данные у нашего Python API (который мы добавили на Шаге 1)
-            const response = await api.fetchApi("/telegram_sender/get_legacy_config");
-            
-            if (response.status === 200) {
+            if (!currentToken) {
+                const response = await api.fetchApi("/telegram_sender/get_legacy_config");
+                if (!response.ok) {
+                    throw new Error(`Legacy config request failed: HTTP ${response.status}`);
+                }
                 const data = await response.json();
-                
-                // Проверяем, пришло ли что-то полезное
                 if (data && (data.bot_token || data.default_chat_id)) {
-                    console.log("[Telegram Sender] ♻️ Legacy config found! Migrating settings safely via UI API...");
-                    
-                    // 3. Используем официальный API ComfyUI для установки значений
-                    // Это инициирует правильное сохранение файла comfy.settings.json самим ComfyUI
-                    
-                    if (data.bot_token) {
-                        app.ui.settings.setSettingValue("Telegram.BotToken", data.bot_token);
+                    const settingMap = {
+                        bot_token: "Telegram.BotToken",
+                        default_chat_id: "Telegram.DefaultChatId",
+                        lora_mapping: "Telegram.LoraMapping",
+                        nsfw_channel_id: "Telegram.NSFWChannelId",
+                        unsorted_channel_id: "Telegram.UnsortedChannelId",
+                        civitai_api_key: "Telegram.CivitaiApiKey",
+                        civitai_nsfw_level: "Telegram.CivitaiNsfwLevel",
+                    };
+                    for (const [source, setting] of Object.entries(settingMap)) {
+                        if (data[source]) {
+                            app.ui.settings.setSettingValue(setting, data[source]);
+                        }
                     }
-                    if (data.default_chat_id) {
-                        app.ui.settings.setSettingValue("Telegram.DefaultChatId", data.default_chat_id);
-                    }
-                    if (data.lora_mapping) {
-                        app.ui.settings.setSettingValue("Telegram.LoraMapping", data.lora_mapping);
-                    }
-                    if (data.nsfw_channel_id) {
-                        app.ui.settings.setSettingValue("Telegram.NSFWChannelId", data.nsfw_channel_id);
-                    }
-      if (data.unsorted_channel_id) {
-        app.ui.settings.setSettingValue("Telegram.UnsortedChannelId", data.unsorted_channel_id);
-      }
-      if (data.civitai_api_key) {
-        app.ui.settings.setSettingValue("Telegram.CivitaiApiKey", data.civitai_api_key);
-      }
-      if (data.civitai_nsfw_level) {
-        app.ui.settings.setSettingValue("Telegram.CivitaiNsfwLevel", data.civitai_nsfw_level);
-      }
-                    
-                    console.log("[Telegram Sender] ✅ Settings migrated successfully!");
                     app.extensionManager.toast.add({
-                    severity: 'success',
-                    summary: '✅ Settings migrated successfully!',
-                    detail: 'Telegram settings migrated successfully!',
-                    life: 3000
+                        severity: "success",
+                        summary: "Settings migrated successfully",
+                        detail: "Telegram settings migrated successfully.",
+                        life: 3000,
                     });
                 }
             }
         } catch (error) {
             console.error("[Telegram Sender] Migration check failed:", error);
         }
-    }
+
+        if (app.ui.settings.getSettingValue("Telegram.AutoCivitaiFetch", true)) {
+            await requestScan("");
+        }
+    },
 });

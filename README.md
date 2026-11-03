@@ -17,7 +17,7 @@ Can be broken on latest versions
 - 🔁 Automatic retries on errors
 - 💾 Saving prompt to PNG metadata in A1111 format
 - 📦 Optional channel for unsorted images
-- 🌐 Compatibility with Civitai and other metadata recognition services
+- 🌐 Background CivitAI model metadata and preview fetching, with cancellation and a manual scan
 
 ## 📥 Installation
 
@@ -115,7 +115,9 @@ Now:
 4. Enter **default_chat_id** (optional, can be specified in each node separately)
 5. (Optional) Configure **LoRA to Channel Mapping** - one line per rule: `lora_name:chat_id`
 6. (Optional) Configure **NSFW Channel ID** and **Unsorted Channel ID**
-7. Settings are saved automatically
+7. Leave **Automatically fetch CivitAI model information on startup** enabled to start a background scan after the UI loads, or disable it
+8. Use **Scan now** and **Cancel scan** in Settings to manage a scan manually
+9. Settings are saved automatically
 
 **Note:** If you have an old `TelegramConfig` node in your workflow, the settings will be automatically migrated to the new format on first startup.
 
