@@ -483,3 +483,22 @@ Based on a heavily modified <https://github.com/edelvarden/comfyui_image_metadat
 ## 📞 Support
 
 If you encounter any issues or have suggestions, create an [issue](https://github.com/Sergey004/ComfyUI-Telegram-Sender/issues) on GitHub.
+
+
+## Send an output image from the node menu
+
+For a node displaying exactly one identifiable saved output image, open its node context menu and choose **Send image to Telegram**, then confirm. The original is sent as a document using the existing saved `Telegram.BotToken` and `Telegram.DefaultChatId`; there is no destination selector. Save those settings first. Missing settings are reported in the confirmation dialog. Ambiguous multiple images, temporary previews and unsupported images are not offered. Only PNG, JPEG and WebP under the output directory (up to 20 MiB) are accepted.
+
+This feature supports **single-user mode only**; multi-user requests are rejected. Same-origin checks are not authentication: protect ComfyUI and its settings endpoints with a trusted authentication and network boundary before enabling access, and check reverse-proxy origin handling. Existing settings and legacy endpoints may expose tokens to authorized browser users. Never expose the service publicly without appropriate protection. A timeout can mean delivery is unknown: check Telegram before retrying. Deduplication is process-local, bounded and lost on restart; it does not guarantee exactly-once delivery. Real Telegram delivery has not been verified by the isolated mock tests.
+
+The preview is a server-read snapshot; the server verifies its SHA-256 before sending. Request IDs use cryptographic `getRandomValues`, including on non-localhost HTTP; if unavailable, sending fails closed. Plain HTTP is not confidential or authenticated: use HTTPS and a trusted access boundary. If image-context route initialization fails, a sanitized warning is logged and the existing nodes remain available; the image menu itself may be unavailable.
+
+## 从节点菜单发送输出图片
+
+当节点显示且能准确识别唯一一张已保存的输出图片时，打开节点右键菜单，选择**发送图片到 Telegram**并确认。原图以文件方式发送，复用已保存的 `Telegram.BotToken` 和 `Telegram.DefaultChatId`，无需选择目标；请先保存原有设置，缺失时弹窗会明确提示。多图不明确、临时预览和不支持的图片不会提供该菜单。仅支持输出目录内不超过 20 MiB 的 PNG、JPEG 和 WebP。
+
+确认框显示服务端读取的原图快照；发送时重新读取文件并核对 SHA-256，仅发送与确认快照一致的字节。图片被修改、替换或变为符号链接时会拒绝发送，需重新选择并确认。代理必须正确保留请求的 Host、Origin 和协议，使同源校验成立；代理也不得改写预览内容或摘要。
+
+此功能**仅支持单用户模式**，多用户请求会被拒绝。同源检查不是身份认证：开放访问前必须为 ComfyUI 及设置接口配置可信身份认证和网络边界，并检查反向代理的来源处理。现有设置及旧接口可能向有权访问的浏览器用户暴露 Token，请勿在缺少适当保护时公开服务。超时可能代表发送结果未知，重试前请先检查 Telegram。去重仅在当前进程内有效，容量有限且重启后失效，不能保证恰好发送一次。隔离模拟测试不等于真实 Telegram 送达验证。
+
+请求 ID 使用密码学安全的 `getRandomValues`，支持非 localhost 的 HTTP；如果安全随机数不可用则拒绝发送。普通 HTTP 不提供保密或身份认证，仍应使用 HTTPS 并配置可信访问边界。若图片菜单路由初始化失败，日志仅输出脱敏告警，已有节点仍可用，但图片菜单功能可能不可用。
