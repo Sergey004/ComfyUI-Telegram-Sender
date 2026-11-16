@@ -1,5 +1,13 @@
 from .telegram_sender import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
+try:
+    from server import PromptServer
+    from .telegram_image_context import register_routes
+    register_routes(PromptServer.instance)
+except Exception:
+    # Exceptions may contain credentials, request URLs or file paths.
+    print("[Telegram Sender] Warning: image context routes unavailable; existing nodes remain enabled.")
+
 WEB_DIRECTORY = "./js"
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
